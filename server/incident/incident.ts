@@ -74,15 +74,19 @@ export class Incident {
   postmortem: string | null = null;
   jamieMeetingId: string | null = null;
 
+  // sim: the production the watchtower already watches. Without it, a fresh
+  // simulation with the outage already 9 minutes in (the classic drill).
   constructor(
     readonly title: string,
     readonly severity: "SEV1" | "SEV2",
     private jamie: Jamie,
     private onChange: () => void,
+    sim?: ShopfrontSim,
+    declaredBy = "commander",
   ) {
-    this.sim = new ShopfrontSim();
-    this.declaredAt = this.sim.startedAt;
-    this.log("declared", `Incident declared: ${title}`, "commander");
+    this.sim = sim ?? new ShopfrontSim();
+    this.declaredAt = Date.now();
+    this.log("declared", declaredBy === "watchtower" ? `Detected and declared by the watchtower: ${title}` : `Incident declared: ${title}`, declaredBy);
   }
 
   log(kind: TimelineEntry["kind"], text: string, by: string, at = Date.now()): void {

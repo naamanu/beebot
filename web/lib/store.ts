@@ -5,7 +5,7 @@ import { shouldPlan, type PlanMode } from "./plan-mode.ts";
 export { shouldPlan, type PlanMode };
 import { buildTasks } from "../../server/tasks.ts";
 import { navigate } from "../hooks/use-route.ts";
-import type { AgentView, ClientMsg, IncidentView, MicStatus, MissionView, RouteVerdict, ServerMsg, Template, Upload } from "../../server/types.ts";
+import type { AgentView, ClientMsg, IncidentView, MicStatus, MissionView, Proposal, RouteVerdict, ServerMsg, Template, Upload, WatchView } from "../../server/types.ts";
 
 export interface FeedItem {
   id: number;
@@ -29,6 +29,9 @@ interface TowerState {
   agents: AgentView[];
   rules: string[];
   incident: IncidentView | null;
+  watch: WatchView | null; // production, as the watchtower sees it
+  proposals: Proposal[]; // work the tower suggests
+  lastSpoken: { text: string; at: number } | null; // what the tower last said aloud
   missions: MissionView[];
   selectedTaskId: string | null; // null: the command bar starts a new task
   selectTask: (id: string | null) => void;
@@ -68,6 +71,9 @@ export const useTower = create<TowerState>()((set, get) => ({
   agents: [],
   rules: [],
   incident: null,
+  watch: null,
+  proposals: [],
+  lastSpoken: null,
   missions: [],
   selectedTaskId: null,
   selectTask: (id) => {
@@ -135,6 +141,8 @@ function handle(m: ServerMsg): void {
       set((s) => ({
         agents: m.agents,
         incident: m.incident,
+        watch: m.watch,
+        proposals: m.proposals,
         missions: m.missions,
         selectedTaskId: s.selectedTaskId && m.tasks.some((task) => task.id === s.selectedTaskId) ? s.selectedTaskId : null,
         focused: s.focused && m.agents.some((a) => a.id === s.focused) ? s.focused : null,
@@ -185,8 +193,15 @@ function handle(m: ServerMsg): void {
       }
       break;
     case "speak":
-      set((s) => ({ feed: s.feed[0] ? [{ ...s.feed[0], question: m.text }, ...s.feed.slice(1)] : s.feed }));
+      set((s) => ({
+        lastSpoken: { text: m.text, at: Date.now() },
+        // Only a clarifying question belongs to the decision that asked it.
+        feed: s.feed[0]?.verdict?.action === "clarify" && !s.feed[0].question ? [{ ...s.feed[0], question: m.text }, ...s.feed.slice(1)] : s.feed,
+      }));
       speak(m.text);
+      break;
+    case "watch":
+      set({ watch: m.watch });
       break;
     case "incident":
       set({ incident: m.incident });

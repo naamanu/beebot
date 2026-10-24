@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Ellipsis, Hand, ListChecks, Play, RadioTower, Trash2 } from "lucide-react";
+import { Eye, EyeOff, Ellipsis, Hand, ListChecks, Play, RadioTower, Trash2, Zap } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,6 +38,7 @@ export function TopBar() {
   const send = useTower((s) => s.send);
   const route = useRoute();
   const [confirmReset, setConfirmReset] = useState(false);
+  const watch = useTower((s) => s.watch);
   const cost = tasks.reduce((sum, task) => sum + task.costUsd, 0);
   // A task waiting on you is still active work.
   const working = tasks.filter((task) => task.status === "working" || task.status === "planning" || task.status === "needs_you").length;
@@ -74,6 +75,7 @@ export function TopBar() {
       </nav>
 
       <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
+        <WatchPill />
         {/* One compact status summary */}
         <Pill className={cn("hidden lg:inline-flex", !connected && "border-span-error/40 text-span-error")}>
           <Dot className={connected ? (working ? "animate-pulse bg-span-retrieval" : "bg-span-tool") : "bg-span-error"} />
@@ -103,6 +105,13 @@ export function TopBar() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuItem onSelect={() => send({ type: "watch_toggle", on: !watch?.enabled })} disabled={!connected}>
+              {watch?.enabled ? <EyeOff /> : <Eye />} {watch?.enabled ? "Stop watching production" : "Watch production"}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => send({ type: "simulate_outage" })} disabled={!connected || watch?.state === "anomaly"}>
+              <Zap /> Simulate a bad deploy (demo)
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => send({ type: "start", tasks: [] })} disabled={!connected}>
               <Play /> Start 4 demo coding tasks
             </DropdownMenuItem>
@@ -158,5 +167,36 @@ export function TopBar() {
         </AlertDialogContent>
       </AlertDialog>
     </header>
+  );
+}
+
+// The watchtower at a glance: is it watching, and how is checkout doing.
+function WatchPill() {
+  const watch = useTower((s) => s.watch);
+  if (!watch) return null;
+  const bad = watch.state === "anomaly";
+  return (
+    <span
+      className={cn(
+        "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 font-mono text-[11px]",
+        !watch.enabled ? "border-border text-muted-foreground" : bad ? "border-span-error/50 bg-span-error/10 text-span-error" : "border-border text-foreground",
+      )}
+      title={watch.enabled ? `The watchtower checks production every few seconds and acts when checkout errors stay above ${watch.thresholdPct}%` : "The watchtower is off"}
+    >
+      {watch.enabled ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+      {watch.enabled ? "watching" : "not watching"} · checkout {watch.errorRate.toFixed(1)}%
+      <Sparkline points={watch.series.map((p) => p.v)} bad={bad} />
+    </span>
+  );
+}
+
+function Sparkline({ points, bad }: { points: number[]; bad: boolean }) {
+  if (points.length < 2) return null;
+  const max = Math.max(10, ...points);
+  const d = points.map((v, i) => `${i ? "L" : "M"}${((i / (points.length - 1)) * 40).toFixed(1)},${(14 - (v / max) * 12).toFixed(1)}`).join(" ");
+  return (
+    <svg width={40} height={14} aria-hidden className="overflow-visible">
+      <path d={d} fill="none" strokeWidth={1.5} className={bad ? "stroke-span-error" : "stroke-span-tool"} />
+    </svg>
   );
 }

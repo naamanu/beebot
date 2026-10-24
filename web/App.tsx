@@ -13,6 +13,7 @@ import { AgentSheet } from "@/components/tasks/agent-sheet";
 import { TaskDetail } from "@/components/tasks/task-detail";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/top-bar";
+import { ProposalBanner } from "@/components/proposal-banner";
 import { useMic } from "@/hooks/use-mic";
 import { useRoute } from "@/hooks/use-route";
 import { useAutoSelectNewTasks, useTasks } from "@/hooks/use-tasks";
@@ -81,6 +82,7 @@ function TasksView({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: () => 
             <p className="font-heading text-xl">Drop files to attach them</p>
           </div>
         )}
+        <ProposalBanner />
         {selected ? (
           <TaskDetail key={selected.id} task={selected} />
         ) : (

@@ -30,15 +30,17 @@ export const SERVICES = ["web-frontend", "checkout-api", "payments-api", "search
 export type Service = (typeof SERVICES)[number];
 
 export class ShopfrontSim {
-  readonly startedAt: number; // when the simulation (and the incident) began
-  readonly impactAt: number; // when the bad deploy landed
+  readonly startedAt: number; // when the simulation began
   deploys: Deploy[];
   statusPosts: StatusPost[] = [];
   private restartedAt: number | null = null;
+  private badId: string | null = null; // the deploy that broke payments, if any
+  private cdnId: string | null = null; // the unrelated CDN change (a red herring)
 
-  constructor(now = Date.now()) {
+  // outage: start with the classic drill already 9 minutes in. Without it the
+  // store is healthy until injectOutage() lands a bad deploy.
+  constructor(now = Date.now(), { outage = true } = {}) {
     this.startedAt = now;
-    this.impactAt = now - 9 * MIN;
     this.deploys = [
       {
         id: "479",
@@ -58,34 +60,63 @@ export class ShopfrontSim {
         diff: "src/components/CheckoutButton.tsx | 14 +++++++-------\n- className=\"btn btn-primary\"\n+ className=\"btn btn-primary btn-lg rounded-full\"",
         rolledBackAt: null,
       },
-      {
-        id: "482",
-        service: "payments-api",
-        author: "sam",
-        at: this.impactAt,
-        message: "perf: tune DB pool and retry policy",
-        diff: "config/production.env\n- DB_POOL_MAX=50\n+ DB_POOL_MAX=5\n- PAYMENT_RETRY_ATTEMPTS=3\n+ PAYMENT_RETRY_ATTEMPTS=6",
-        rolledBackAt: null,
-      },
-      {
-        id: "483",
-        service: "cdn",
-        author: "ana",
-        at: now - 6 * MIN,
-        message: "Shorten cache TTL for /static to 5m",
-        diff: "- cache_ttl /static/* 1h\n+ cache_ttl /static/* 5m",
-        rolledBackAt: null,
-      },
     ];
+    if (outage) this.injectOutage(now - 9 * MIN, now - 6 * MIN);
+  }
+
+  // A "perf tuning" deploy shrinks the payments DB pool; a CDN TTL change
+  // lands a little later and muddies the water.
+  injectOutage(at = Date.now(), cdnAt = at + 100_000): { badDeployId: string } {
+    const nextId = () => String(Math.max(...this.deploys.map((d) => Number(d.id))) + 1);
+    this.badId = nextId();
+    this.deploys.push({
+      id: this.badId,
+      service: "payments-api",
+      author: "sam",
+      at,
+      message: "perf: tune DB pool and retry policy",
+      diff: "config/production.env\n- DB_POOL_MAX=50\n+ DB_POOL_MAX=5\n- PAYMENT_RETRY_ATTEMPTS=3\n+ PAYMENT_RETRY_ATTEMPTS=6",
+      rolledBackAt: null,
+    });
+    this.cdnId = nextId();
+    this.deploys.push({
+      id: this.cdnId,
+      service: "cdn",
+      author: "ana",
+      at: cdnAt,
+      message: "Shorten cache TTL for /static to 5m",
+      diff: "- cache_ttl /static/* 1h\n+ cache_ttl /static/* 5m",
+      rolledBackAt: null,
+    });
+    this.restartedAt = null;
+    return { badDeployId: this.badId };
+  }
+
+  get badDeploy(): Deploy | null {
+    return this.deploys.find((d) => d.id === this.badId) ?? null;
+  }
+
+  // When the current outage began (or the start of the simulation if healthy).
+  get impactAt(): number {
+    return this.badDeploy?.at ?? this.startedAt;
   }
 
   get fixedAt(): number | null {
-    return this.deploys.find((d) => d.id === "482")?.rolledBackAt ?? null;
+    return this.badDeploy?.rolledBackAt ?? null;
+  }
+
+  // An outage that hasn't been fixed yet.
+  get broken(): boolean {
+    return !!this.badDeploy && this.fixedAt === null;
+  }
+
+  private cdnChangeAt(): number | null {
+    return this.deploys.find((d) => d.id === this.cdnId)?.at ?? null;
   }
 
   // 0 = healthy, 1 = full outage, for the payments path at time t.
   private severity(t: number): number {
-    if (t < this.impactAt) return 0;
+    if (!this.badDeploy || t < this.impactAt) return 0;
     const ramp = Math.min(1, (t - this.impactAt) / (1.5 * MIN));
     const fixed = this.fixedAt;
     if (fixed !== null && t >= fixed) return ramp * Math.max(0, 1 - (t - fixed) / (0.75 * MIN)); // recovers over ~45s
@@ -108,7 +139,7 @@ export class ShopfrontSim {
       case "payments-api:p95_latency_ms":
         return 120 + s * 5100 + noise(4) * 15;
       case "payments-api:db_pool_in_use": {
-        const max = this.fixedAt !== null && t >= this.fixedAt ? 50 : t >= this.impactAt ? 5 : 50;
+        const max = !this.badDeploy || (this.fixedAt !== null && t >= this.fixedAt) ? 50 : t >= this.impactAt ? 5 : 50;
         return max === 5 ? Math.min(5, 1 + s * 4 + Math.abs(noise(5))) : 9 + noise(5) * 3;
       }
       case "web-frontend:error_rate":
@@ -118,8 +149,8 @@ export class ShopfrontSim {
       case "search-api:p95_latency_ms":
         return t >= this.deploys[0]!.at ? 790 + noise(8) * 40 : 310;
       case "cdn:cache_hit_ratio": {
-        const cdnChange = this.deploys.find((d) => d.id === "483")!.at;
-        if (t < cdnChange) return 96 + noise(9);
+        const cdnChange = this.cdnChangeAt();
+        if (cdnChange === null || t < cdnChange) return 96 + noise(9);
         return Math.min(96, 61 + ((t - cdnChange) / (8 * MIN)) * 35) + noise(9); // dips, then refills
       }
       case "checkout-api:rps":
@@ -152,7 +183,7 @@ export class ShopfrontSim {
 
   private logLine(service: Service, s: number, i: number, t: number): string | null {
     const id = (n: number) => (Math.abs(Math.sin(i * 12.9898 + n) * 43758.5453) % 1).toString(36).slice(2, 10);
-    const pool = this.fixedAt !== null && t >= this.fixedAt ? 50 : t >= this.impactAt ? 5 : 50;
+    const pool = !this.badDeploy || (this.fixedAt !== null && t >= this.fixedAt) ? 50 : t >= this.impactAt ? 5 : 50;
     switch (service) {
       case "payments-api":
         if (s > 0.3)
@@ -171,8 +202,8 @@ export class ShopfrontSim {
       case "search-api":
         return i % 4 === 0 ? `WARN slow query ranking=v7 took ${760 + (i % 90)}ms` : null;
       case "cdn": {
-        const cdnChange = this.deploys.find((d) => d.id === "483")!.at;
-        if (t >= cdnChange && i % 2 === 0) return `MISS /static/app.${id(4).slice(0, 6)}.js origin_fetch=${120 + (i % 60)}ms`;
+        const cdnChange = this.cdnChangeAt();
+        if (cdnChange !== null && t >= cdnChange && i % 2 === 0) return `MISS /static/app.${id(4).slice(0, 6)}.js origin_fetch=${120 + (i % 60)}ms`;
         return i % 5 === 0 ? `HIT /static/app.js` : null;
       }
     }

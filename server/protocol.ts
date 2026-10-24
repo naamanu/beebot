@@ -32,6 +32,10 @@ export const clientMessageSchema: z.ZodType<ClientMsg> = z.discriminatedUnion("t
   z.object({ type: z.literal("declare_incident"), title: z.string().trim().max(1000) }),
   z.object({ type: z.literal("incident_status"), status: incidentStatus }),
   z.object({ type: z.literal("clear_rules") }),
+  z.object({ type: z.literal("watch_toggle"), on: z.boolean() }),
+  z.object({ type: z.literal("simulate_outage") }),
+  z.object({ type: z.literal("accept_proposal"), id }),
+  z.object({ type: z.literal("dismiss_proposal"), id }),
 ]);
 
 export const previewSchema = z.object({ text, attachments: z.array(z.string().max(255)).max(20).optional(), taskId: id.nullable().optional() });

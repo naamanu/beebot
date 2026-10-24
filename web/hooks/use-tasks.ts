@@ -24,7 +24,8 @@ export function useAutoSelectNewTasks(tasks: TaskView[]): void {
   useEffect(() => {
     const { lastSentAt, selectTask } = useTower.getState();
     if (seen.current) {
-      const fresh = tasks.find((t) => !seen.current!.has(t.id) && Date.now() - lastSentAt < 30_000 && t.createdAt >= lastSentAt - 2000);
+      // Our own new work, or an incident the watchtower declared on its own.
+      const fresh = tasks.find((t) => !seen.current!.has(t.id) && (t.kind === "incident" || (Date.now() - lastSentAt < 30_000 && t.createdAt >= lastSentAt - 2000)));
       if (fresh) selectTask(fresh.id);
     }
     seen.current = new Set(tasks.map((t) => t.id));

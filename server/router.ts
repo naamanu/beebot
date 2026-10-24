@@ -9,7 +9,7 @@ import type { AgentView, IncidentAction, IncidentView, Intent, MissionView, Rout
 // acts immediately, low confidence asks the operator.
 
 const INTENTS = ["assign", "stop", "correct", "approve", "rule", "incident", "chatter"] as const;
-const INCIDENT_ACTIONS = ["none", "declare", "identified", "mitigated", "resolved"] as const;
+const INCIDENT_ACTIONS = ["none", "declare", "identified", "mitigated", "resolved", "stand_down"] as const;
 
 export interface RouterContext {
   agents: AgentView[];
@@ -22,6 +22,7 @@ export interface RouterContext {
   pendingPlan?: MissionView | null; // a plan waiting for the operator's approval
   viewingTask?: string | null; // title of the task the operator has open
   newTaskMode?: boolean; // no task open: the command bar is starting new work
+  pendingProposal?: { title: string; items: string[] } | null; // work the tower suggested
 }
 
 export class Router {
@@ -51,6 +52,7 @@ export class Router {
       "none",
       "unclear",
       ...(ctx.pendingPlan ? ["plan"] : []),
+      ...(ctx.pendingProposal ? ["proposal"] : []),
       ...ctx.agents.map((a) => a.id),
     ];
     const schema = z.object({
@@ -132,7 +134,7 @@ export class Router {
 // exact options the router was torn between.
 export function clarifyingQuestion(v: RouteVerdict, agents: AgentView[]): string {
   const label = (t: string) =>
-    t === "all" ? "all agents" : t === "none" ? "nobody" : t === "new" ? "a new agent" : t === "plan" ? "the plan" : `agent ${t}`;
+    t === "all" ? "all agents" : t === "none" ? "nobody" : t === "new" ? "a new agent" : t === "plan" ? "the plan" : t === "proposal" ? "the suggested follow-ups" : `agent ${t}`;
   const [a, b] = v.votes;
   if (a?.intent === "incident" && b?.intent === "incident" && a.incidentAction !== b.incidentAction) {
     return "Should I declare a new incident, or update the current incident’s status? Please name the action.";
@@ -200,6 +202,10 @@ ${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An in
     ? `\nNo task is open: the operator is starting NEW work. Unless they name an existing agent (by number or name), answer a waiting plan or approval, set a rule, or talk about the incident, this is an assign with target "new" — even if an existing agent has related files or context.\n`
     : ""
 }${planBlock(ctx.pendingPlan)}${
+  ctx.pendingProposal
+    ? `\n<suggested_work>\nThe tower suggested: ${ctx.pendingProposal.title}\n${ctx.pendingProposal.items.map((i) => `- ${i}`).join("\n")}\nTo answer it, use target "proposal": "start the follow-ups" / "yes, do them" → approve; "skip those" / "not now" → stop.\n</suggested_work>\n`
+    : ""
+}${
   ctx.attachments?.length
     ? `\nThe operator attached files to this instruction: ${ctx.attachments.join(", ")}. Starting work on them is an assign (target "new" unless they name an agent).\n`
     : ""
@@ -229,7 +235,7 @@ Decide:
   - correct: change what it is doing, or give it new information.
   - approve: the work is good, ship it. Also: saying yes to an agent that is waiting for approval ("approve", "do it", "go ahead", "yes, roll it back").
   - rule: a lasting constraint that should apply to every agent from now on ("never…", "always…", "no new dependencies"). Rules always target "all".
-  - incident: about the incident itself, not one agent. Target "all". Set incident_action: "declare" to start an incident (instruction = a short title, e.g. "Checkout failing"), or "identified", "mitigated", "resolved" when the commander states that status.
+  - incident: about the incident itself, not one agent. Target "all". Set incident_action: "declare" to start an incident (instruction = a short title, e.g. "Checkout failing"), or "identified", "mitigated", "resolved" when the commander states that status, or "stand_down" when they call it off as a false alarm ("stand down", "false alarm, cancel the incident").
   - chatter: talking to someone else, thinking aloud, or filler. Never use chatter for something phrased as an instruction to an agent ("make it…", "change that…").
 - If it is an instruction but you cannot tell which agent it is for, or what it asks for, set target to "unclear". Do not guess: the operator will be asked. Before choosing "unclear", check for a spoken agent number, including mis-transcriptions: a leading "to"/"too" is agent two, "for" is four, "won" is one, "tree"/"free" is three. "to stop" means "two, stop".
 - instruction: a clear directive the agent can act on without hearing the original speech.

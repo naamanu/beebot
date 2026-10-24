@@ -84,7 +84,7 @@ export interface IncidentView {
 
 export type Intent = "assign" | "stop" | "correct" | "approve" | "rule" | "incident" | "chatter";
 
-export type IncidentAction = "declare" | "identified" | "mitigated" | "resolved" | "none";
+export type IncidentAction = "declare" | "identified" | "mitigated" | "resolved" | "stand_down" | "none";
 
 export interface RouteVerdict {
   utterance: string;
@@ -107,7 +107,7 @@ export interface Decision {
 export type MicStatus = "stopped" | "connecting" | "listening" | "error";
 
 export type ServerMsg =
-  | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null; missions: MissionView[]; tasks: TaskView[] }
+  | { type: "state"; watch: WatchView; proposals: Proposal[]; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null; missions: MissionView[]; tasks: TaskView[] }
   | { type: "agent_event"; id: string; event: AgentEvent; status: AgentStatus; runId: string | null; costUsd: number }
   | { type: "transcript"; text: string; final: boolean }
   | { type: "mic_state"; status: MicStatus; error?: string }
@@ -116,7 +116,8 @@ export type ServerMsg =
   | { type: "speak"; text: string }
   | { type: "notice"; level: "info" | "error"; text: string }
   | { type: "telemetry" } // trace data changed: refetch
-  | { type: "incident"; incident: IncidentView | null };
+  | { type: "incident"; incident: IncidentView | null }
+  | { type: "watch"; watch: WatchView };
 
 export interface CommandContext {
   template: Template;
@@ -142,7 +143,11 @@ export type ClientMsg =
   | { type: "approval"; id: string; decision: "approve" | "deny" }
   | { type: "declare_incident"; title: string }
   | { type: "incident_status"; status: IncidentStatus }
-  | { type: "clear_rules" };
+  | { type: "clear_rules" }
+  | { type: "watch_toggle"; on: boolean }
+  | { type: "simulate_outage" }
+  | { type: "accept_proposal"; id: string }
+  | { type: "dismiss_proposal"; id: string };
 
 // --- Telemetry ---
 
@@ -300,4 +305,25 @@ export interface TaskView {
   result: string | null;
   branch: string | null; // coding: the branch with the finished work
   costUsd: number;
+}
+
+// --- Proactive: the watchtower and what it proposes ---
+
+export interface WatchView {
+  enabled: boolean;
+  errorRate: number; // checkout error rate now, %
+  state: "healthy" | "anomaly";
+  thresholdPct: number;
+  lastCheckAt: number;
+  series: { t: number; v: number }[]; // last 10 minutes
+}
+
+// Work the tower suggests on its own, e.g. action items from a review call.
+export interface Proposal {
+  id: string;
+  source: "jamie";
+  title: string;
+  items: string[];
+  createdAt: number;
+  status: "open" | "accepted" | "dismissed";
 }

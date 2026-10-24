@@ -11,6 +11,9 @@ import { Agent, type AgentSnapshot } from "./agents.ts";
 import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
 import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
 import { writePostmortem } from "./incident/postmortem.ts";
+import { ShopfrontSim } from "./incident/sim.ts";
+import { Watchtower, anomalyBriefing, type Anomaly } from "./watch/watchtower.ts";
+import { closingBriefing, incidentBriefing, type BriefingState } from "./watch/briefing.ts";
 import { Mission, fallbackTitle, type SpawnRequest } from "./missions/mission.ts";
 import { shortTitle } from "./missions/title.ts";
 import { recoverAgent, recoverMission } from "./missions/recovery.ts";
@@ -22,7 +25,7 @@ import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { Approval, Decision, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
+import type { Approval, Decision, Proposal, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
 import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, nextAgentId, repoFiles, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,6 +61,11 @@ let routing = Promise.resolve(); // utterances are routed one at a time, in orde
 let incident: Incident | null = null;
 let callNotes: JamieMeeting | null = null; // the war-room call, from Jamie
 let incidentTimer: ReturnType<typeof setInterval> | undefined;
+// Production, watched continuously: healthy until a bad deploy lands.
+const production = new ShopfrontSim(Date.now(), { outage: false });
+const watchtower = new Watchtower(production, (a) => onAnomaly(a));
+let lastBriefing: { at: number; state: BriefingState } | null = null;
+let proposals: Proposal[] = [];
 // Planned tasks. Live missions run here; after a restart, earlier ones come
 // back read-only (their agents are restored, the orchestration is not).
 let missions: Mission[] = [];
@@ -81,7 +89,7 @@ function tasks() {
 }
 
 function state(): ServerMsg {
-  return { type: "state", tasks: tasks(), agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
+  return { type: "state", watch: watchtower.view(), proposals: proposals.filter((p) => p.status === "open"), tasks: tasks(), agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
 }
 
 // --- Session persistence: the server can restart without losing agents. ---
@@ -197,6 +205,7 @@ function resetSession(): void {
   for (const a of agents) a.close("reset");
   agents = [];
   missions = [];
+  proposals = [];
   archivedMissions = [];
   endIncident();
   run = null;
@@ -375,11 +384,19 @@ function cancelStart(id: string): void {
 
 // --- Incidents ---
 
-function declareIncident(title: string): void {
-  resetSession();
-  incident = new Incident(title, "SEV1", jamie, () => broadcastIncident());
+// Start an incident with four investigators. Other tasks keep running.
+// by "watchtower": declared proactively on the production being watched.
+function declareIncident(title: string, { by = "commander", anomaly = null as Anomaly | null } = {}): void {
+  // Only the previous incident's investigators are replaced.
+  for (const a of agents.filter((x) => x.template === "incident")) a.close("reset");
+  agents = agents.filter((x) => x.template !== "incident");
+  endIncident();
+  // A manual drill on a healthy store gets the classic outage, already 9 minutes in.
+  if (!production.broken && by === "commander") production.injectOutage(Date.now() - 9 * 60_000, Date.now() - 6 * 60_000);
+  incident = new Incident(title, "SEV1", jamie, () => broadcastIncident(), production, by);
   callNotes = null;
-  run = createRun(WORK, TEMPLATE);
+  lastBriefing = null;
+  run ??= createRun(WORK, TEMPLATE);
   for (const role of INCIDENT_ROLES) {
     const id = nextAgentId(run);
     const agent = makeAgent(id, `${role.task} Incident: ${title}.`, addScratchDir(run, id), undefined, role.name);
@@ -387,16 +404,89 @@ function declareIncident(title: string): void {
     agent.begin();
   }
   // Metrics move continuously; push them to the UI while the incident is open.
-  incidentTimer = setInterval(broadcastIncident, 2000);
+  incidentTimer = setInterval(() => {
+    broadcastIncident();
+    maybeBrief();
+  }, 2000);
   broadcast(state());
-  broadcast({ type: "speak", text: `Incident declared: ${title}. Four investigators are on it.` });
+  broadcast({ type: "speak", text: anomaly ? anomalyBriefing(anomaly) : `Incident declared: ${title}. Four investigators are on it.` });
   save();
+}
+
+// The watchtower saw a sustained spike: act on it unless an incident is open.
+function onAnomaly(a: Anomaly): void {
+  if (incident && incident.status !== "resolved") return;
+  const title = a.suspect ? `Checkout errors at ${Math.round(a.errorRate)}% after deploy #${a.suspect.id}` : `Checkout errors at ${Math.round(a.errorRate)}%`;
+  declareIncident(title, { by: "watchtower", anomaly: a });
+  incident?.log("finding", `Watchtower: checkout error rate ${a.errorRate.toFixed(1)}% sustained since ${new Date(a.since).toLocaleTimeString()}${a.suspect ? `; most recent deploy before it: #${a.suspect.id} (${a.suspect.service}, ${a.suspect.author})` : ""}.`, "watchtower");
+}
+
+// Action items from a review call become suggested work: the tower offers,
+// the commander decides.
+function proposeFollowUps(notes: JamieMeeting | null): void {
+  const items = (notes?.tasks ?? []).filter((t) => !t.completed).map((t) => (t.assignee?.name ? `${t.content} (owner: ${t.assignee.name})` : t.content));
+  if (!items.length) return;
+  const proposal: Proposal = { id: randomUUID().slice(0, 8), source: "jamie", title: `Follow-ups from “${notes!.title}”`, items, createdAt: Date.now(), status: "open" };
+  proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
+  broadcast(state());
+  broadcast({ type: "speak", text: `Jamie sent ${items.length} action item${items.length === 1 ? "" : "s"} from the review. Want agents on ${items.length === 1 ? "it" : "them"}? Say “start the follow-ups”.` });
+  save();
+}
+
+function acceptProposal(id: string | null): void {
+  const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
+  if (!p) return;
+  p.status = "accepted";
+  // Code-shaped items get a coding agent; the rest a general one.
+  for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true });
+  broadcast(state());
+  broadcast({ type: "speak", text: `Started ${p.items.length} follow-up task${p.items.length === 1 ? "" : "s"}.` });
+  save();
+}
+
+function dismissProposal(id: string | null): void {
+  const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
+  if (!p) return;
+  p.status = "dismissed";
+  broadcast(state());
+  save();
+}
+
+// Called off as a false alarm: stop the investigators and close it.
+function standDown(by: string): void {
+  if (!incident || incident.status === "resolved") return;
+  for (const a of agents.filter((x) => x.template === "incident" && x.status === "working")) void a.stop("Stood down by the commander");
+  incident.log("status", "Stood down: called off by the commander", by);
+  setIncidentStatus("resolved", by);
+  watchtower.disarm();
+  broadcast({ type: "speak", text: "Standing down. I'll keep watching production." });
+}
+
+// A spoken update during an incident, at most every 45 seconds and only
+// when something changed. Approval prompts are spoken separately.
+function maybeBrief(): void {
+  if (!incident || incident.status === "resolved") return;
+  if (lastBriefing && Date.now() - lastBriefing.at < 45_000) return;
+  const view = incident.view();
+  const b = incidentBriefing(view, agents.map((a) => a.view()), lastBriefing?.state ?? null);
+  if (!lastBriefing) {
+    // First call just records the starting point; the declaration was the first briefing.
+    lastBriefing = { at: Date.now(), state: b?.state ?? lastBriefing!.state };
+    return;
+  }
+  if (!b) return;
+  lastBriefing = { at: Date.now(), state: b.state };
+  broadcast({ type: "speak", text: b.text });
 }
 
 function setIncidentStatus(status: IncidentStatus, by: string): void {
   if (!incident) return;
+  const wasOpen = incident.status !== "resolved";
   incident.setStatus(status, by);
-  if (status === "resolved") clearInterval(incidentTimer);
+  if (status === "resolved") {
+    clearInterval(incidentTimer);
+    if (wasOpen && !/Stood down/.test(incident.timeline.at(-2)?.text ?? "")) broadcast({ type: "speak", text: closingBriefing(incident.view()) });
+  }
   broadcastIncident();
 }
 
@@ -477,6 +567,7 @@ async function routeAndApply(utterance: string, focused: string | null, opts: He
     agents: scoped.map((a) => a.view()),
     viewingTask: task ? task.title : null,
     newTaskMode: !task,
+    pendingProposal: proposals.find((p) => p.status === "open") ?? null,
     rules: rules.list(),
     recent: recent.slice(-4),
     pendingClarification,
@@ -515,7 +606,14 @@ async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): P
   const scoped = task ? agents.filter((a) => task.agentIds.includes(a.id)) : agents;
   if (v.intent === "incident") {
     if (v.incidentAction === "declare") declareIncident(v.instruction || "Production incident");
+    else if (v.incidentAction === "stand_down") standDown("commander (voice)");
     else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
+    return;
+  }
+  // An answer to work the tower suggested.
+  if (v.target === "proposal") {
+    if (v.intent === "approve") acceptProposal(null);
+    else if (v.intent === "stop") dismissProposal(null);
     return;
   }
   // A plan is waiting for approval and this answers it.
@@ -782,6 +880,24 @@ wss.on("connection", (ws) => {
         rules.clear();
         broadcast(state());
         break;
+      case "watch_toggle":
+        watchtower.enabled = msg.on;
+        broadcast({ type: "watch", watch: watchtower.view() });
+        broadcast({ type: "speak", text: msg.on ? "Watching production." : "I've stopped watching production." });
+        break;
+      case "simulate_outage":
+        // Demo: a bad deploy lands on the healthy store; the watchtower should notice.
+        if (!production.broken) {
+          const { badDeployId } = production.injectOutage();
+          broadcast({ type: "notice", level: "info", text: `Simulated: deploy #${badDeployId} just landed on payments-api.` });
+        }
+        break;
+      case "accept_proposal":
+        acceptProposal(msg.id);
+        break;
+      case "dismiss_proposal":
+        dismissProposal(msg.id);
+        break;
     }
     } catch (error) {
       send({ type: "notice", level: "error", text: error instanceof ZodError ? "Invalid control message. Check its type and fields." : error instanceof Error ? error.message : String(error) });
@@ -912,6 +1028,7 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
       callNotes = { ...body.data, id: "webhook", transcript: body.data.transcript.map((t) => `**${t.speakerName}** ${t.text}`).join("\n") };
       incident.jamieMeetingId = callNotes.id;
       incident.log("action", `Call notes received from Jamie: ${body.data.title}`, "Jamie");
+      proposeFollowUps(callNotes);
     }
     return json(200, { ok: true });
   }
@@ -925,6 +1042,7 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
     callNotes = notes;
     current.jamieMeetingId = meetingId;
     current.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
+    proposeFollowUps(callNotes);
     return json(200, { title: callNotes.title });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "GET") {
@@ -948,6 +1066,12 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
 }
 
 restoreSession();
+
+// The watchtower looks at production every few seconds, unasked.
+setInterval(() => {
+  watchtower.check();
+  broadcast({ type: "watch", watch: watchtower.view() });
+}, 5000);
 
 http.listen(PORT, "127.0.0.1", () => {
   const address = http.address();

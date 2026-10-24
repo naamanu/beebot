@@ -102,7 +102,7 @@ test("opening another agent selects its task and clears an old output selection"
 
 test("restored decisions never reopen an agent and a verdict is handled only once", async (t) => {
   const { socket } = await browser(t);
-  socket.receive({ type: "state", agents: [agent], missions: [mission], incident: null, rules: [], decisions: [{ verdict }], tasks: [] });
+  socket.receive({ type: "state", watch: { enabled: true, errorRate: 0.4, state: "healthy", thresholdPct: 5, lastCheckAt: 0, series: [] }, proposals: [], agents: [agent], missions: [mission], incident: null, rules: [], decisions: [{ verdict }], tasks: [] });
   assert.equal(useTower.getState().focused, null);
   command();
   socket.receive({ type: "verdict", verdict });

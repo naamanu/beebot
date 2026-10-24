@@ -45,6 +45,17 @@ With **Plan first** on (the default), new General or Code work doesn't start an 
 
 Turn Plan first off for quick one-agent tasks. Missions are saved; after a restart, finished missions come back read-only. `node scripts/e2e-mission.mjs "<task>" coding` runs one over the WebSocket, and `npx tsx scripts/allocate-check.ts` shows how the allocator splits a fixed plan.
 
+## Proactive: the watchtower
+
+The tower watches production without being asked. Every 5 seconds it checks the store's checkout error rate (the simulated Shopfront, healthy by default). When errors stay above 5% for two checks in a row, it acts on its own:
+
+1. **Detect and declare:** it opens an incident, starts the four investigators, and tells you out loud what it saw and the most likely suspect: "Heads up: checkout errors jumped to 7 percent at 16:12, 12 seconds after deploy 482 to payments-api by sam. I've started four investigators. Say 'stand down' to cancel." The incident opens on screen by itself, and your other tasks keep running.
+2. **Propose the fix:** risky actions such as the rollback still wait for your "approve".
+3. **Brief:** a spoken update at most every 45 seconds, and only when something has changed (the error trend, new findings, actions, approvals waiting). When errors stay back at normal, it offers to resolve; when you close the incident, it gives a closing summary.
+4. **Follow up:** when Jamie's `meeting.completed` webhook delivers the review call's action items, the tower proposes them as tasks ("Want agents on them? Say 'start the follow-ups'").
+
+The top bar shows what it's watching ("watching · checkout 0.4%" with a sparkline). The ⋯ menu turns it on or off and has **Simulate a bad deploy (demo)**. "Stand down" calls off a false alarm; the watchtower re-arms once the store is healthy again.
+
 ## Incident response
 
 Say "declare an incident: checkout is failing" (or click **Declare incident**). Four investigators start on a simulated Shopfront outage:

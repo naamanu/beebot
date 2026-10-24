@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowUp, Code2, FileText, Loader2, Mic, Paperclip, Siren, Sparkles, X } from "lucide-react";
+import { ArrowUp, Volume2, Code2, FileText, Loader2, Mic, Paperclip, Siren, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
 import type { RoutePreview, Template, Upload } from "../../server/types.ts";
 import { Button } from "@/components/ui/button";
@@ -371,8 +371,18 @@ function describe(p: RoutePreview, template: Template, hasFiles: boolean, incide
 // decisions column. Shows the question when the router asks back.
 function Confirmation() {
   const latest = useTower((s) => s.feed[0]);
+  const spoken = useTower((s) => s.lastSpoken);
   const agents = useTower((s) => s.agents);
   const now = useNowTick(1000);
+  // What the tower said on its own (briefings, detections) shows here too.
+  if (spoken && now - spoken.at < 12_000 && (!latest || spoken.at > latest.at)) {
+    return (
+      <div className="flex items-start gap-2 border-b border-border bg-span-workflow/5 px-4 py-2 text-[13px]" role="status">
+        <Volume2 className="mt-0.5 size-3.5 shrink-0 text-span-workflow" />
+        <span><span className="font-medium">Tower:</span> {spoken.text}</span>
+      </div>
+    );
+  }
   if (!latest) return null;
   const v = latest.verdict;
   const recent = v?.action === "clarify" || now - latest.at < 8000;
