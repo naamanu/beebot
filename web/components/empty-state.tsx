@@ -15,7 +15,7 @@ const KINDS: { template: Template; title: string; icon: React.ComponentType<{ cl
     template: "coding",
     title: "Code",
     icon: Code2,
-    blurb: "Each task gets its own agent and git worktree. Steer them out loud.",
+    blurb: "Review a plan, then steer its agents together. Each agent has its own git worktree.",
     examples: ["Add due dates to todos, with tests", "Spin someone up to fix search so it ignores case"],
   },
   {
@@ -35,16 +35,17 @@ export function EmptyState() {
 
   const fill = (t: Template, text: string) => {
     setDraft({ template: t, text });
-    document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+    document.querySelector<HTMLTextAreaElement>("[data-command-input]")?.focus();
   };
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-8 overflow-y-auto px-4 py-8">
+    <div className="flex min-h-0 flex-1 flex-col items-center gap-6 overflow-y-auto px-4 py-6 md:justify-center md:gap-8 md:py-8">
       <div className="text-center">
-        <h2 className="font-heading text-3xl">What should we work on?</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Type below or hold Space and say it. Every instruction is checked by five votes before it lands.</p>
+        <p className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">Your next task</p>
+        <h2 className="font-heading text-2xl sm:text-3xl">What should we work on?</h2>
+        <p className="mx-auto mt-2 max-w-lg text-sm leading-relaxed text-muted-foreground">Describe the outcome you want. Review the plan, steer your agents, and find the results in one place.</p>
       </div>
-      <div className="grid w-full max-w-4xl grid-cols-1 gap-3 md:grid-cols-3">
+      <div className="grid w-full max-w-4xl grid-cols-1 gap-3 lg:grid-cols-3">
         {KINDS.map((k) => (
           <section
             key={k.template}
@@ -65,7 +66,7 @@ export function EmptyState() {
                 <button
                   key={e}
                   onClick={() => fill(k.template, e)}
-                  className="rounded-lg border border-border px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent"
+                  className="rounded-lg border border-border px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   “{e}”
                 </button>

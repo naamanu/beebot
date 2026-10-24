@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Download, ExternalLink, FileText, Image as ImageIcon, Table2 } from "lucide-react";
+import { Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Table2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentView, OutputFile } from "../../server/types.ts";
 import { formatBytesShort } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 const isImage = (n: string) => /\.(png|jpe?g|gif|svg)$/i.test(n);
 const isMarkdown = (n: string) => /\.md$/i.test(n);
@@ -15,8 +16,12 @@ const fileUrl = (agentId: string, name: string) => `/api/agents/${agentId}/outpu
 // Deliverables a general agent writes to outputs/. Refreshes while it works.
 export function useOutputs(agent: AgentView) {
   return useQuery({
-    queryKey: ["outputs", agent.id],
-    queryFn: async () => (await (await fetch(`/api/agents/${agent.id}/outputs`)).json()) as OutputFile[],
+    queryKey: ["outputs", agent.id, agent.status],
+    queryFn: async () => {
+      const response = await fetch(`/api/agents/${agent.id}/outputs`);
+      if (!response.ok) throw new Error(`Could not load outputs (${response.status})`);
+      return response.json() as Promise<OutputFile[]>;
+    },
     enabled: agent.template === "general",
     refetchInterval: agent.status === "working" ? 3000 : false,
   });
@@ -45,29 +50,43 @@ export function OutputChips({ agent, onOpen }: { agent: AgentView; onOpen: () =>
 }
 
 // Full viewer for the focus view.
-export function OutputsPanel({ agent }: { agent: AgentView }) {
-  const files = useOutputs(agent).data ?? [];
-  const [selected, setSelected] = useState<string | null>(null);
+export function OutputsPanel({ agent, initialFile }: { agent: AgentView; initialFile?: string | null }) {
+  const query = useOutputs(agent);
+  const files = query.data ?? [];
+  const [selected, setSelected] = useState<string | null>(initialFile ?? null);
   const current = files.find((f) => f.name === selected) ?? files.find((f) => isMarkdown(f.name)) ?? files[0] ?? null;
 
   return (
     <aside className="flex min-h-0 w-[420px] shrink-0 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h3 className="text-base">Outputs</h3>
-        <span className="font-mono text-[11px] text-muted-foreground">outputs/ · {files.length} files</span>
+        <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">{query.isFetching && <Loader2 className="size-3 animate-spin" aria-label="Refreshing outputs" />}{files.length} file{files.length === 1 ? "" : "s"}</span>
       </div>
-      {files.length === 0 ? (
-        <p className="p-4 text-sm text-muted-foreground">
-          {agent.status === "working" ? "Reports, charts and tables appear here as the agent writes them." : "No outputs."}
-        </p>
+      {query.isError && (
+        <div role="status" className="border-b border-border p-4 text-sm">
+          <p className="font-medium">Couldn’t load the deliverables</p>
+          <p className="mt-1 text-muted-foreground">Check your connection and try again.{files.length > 0 && " Previously loaded files are shown below."}</p>
+          <Button size="sm" variant="outline" className="mt-3" onClick={() => void query.refetch()}>Try again</Button>
+        </div>
+      )}
+      {query.isLoading ? (
+        <div className="space-y-3 p-4" role="status" aria-label="Loading deliverables">
+          {["w-3/4", "w-1/2", "w-2/3"].map((width) => <div key={width} className={cn("h-4 animate-pulse rounded bg-secondary", width)} />)}
+        </div>
+      ) : files.length === 0 ? (
+        !query.isError && <div className="p-4 text-sm">
+          <p className="font-medium">{agent.status === "working" ? "Waiting for the first deliverable" : "No deliverables were saved"}</p>
+          <p className="mt-1 text-muted-foreground">{agent.status === "working" ? "Reports, charts and tables appear here as the agent writes them." : "Review the agent’s activity, or ask it to save its results as files."}</p>
+        </div>
       ) : (
         <>
-          <ul className="flex shrink-0 flex-col border-b border-border py-1">
+          <ul className="flex max-h-48 shrink-0 flex-col overflow-y-auto border-b border-border py-1" aria-label="Deliverables">
             {files.map((f) => (
               <li key={f.name}>
                 <button
                   onClick={() => setSelected(f.name)}
-                  className={cn("flex w-full items-center gap-2 px-4 py-1.5 text-left text-[13px] hover:bg-accent", current?.name === f.name && "bg-secondary")}
+                  aria-current={current?.name === f.name ? "true" : undefined}
+                  className={cn("flex w-full items-center gap-2 px-4 py-2 text-left text-[13px] hover:bg-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring", current?.name === f.name && "bg-secondary")}
                 >
                   <FileIcon name={f.name} />
                   <span className="truncate">{f.name}</span>
@@ -76,7 +95,7 @@ export function OutputsPanel({ agent }: { agent: AgentView }) {
               </li>
             ))}
           </ul>
-          {current && <OutputViewer agentId={agent.id} file={current} />}
+          {current && <OutputViewer key={current.name} agentId={agent.id} file={current} />}
         </>
       )}
     </aside>
@@ -87,9 +106,14 @@ function OutputViewer({ agentId, file }: { agentId: string; file: OutputFile }) 
   const url = fileUrl(agentId, file.name);
   const text = useQuery({
     queryKey: ["output", agentId, file.name, file.modifiedAt],
-    queryFn: async () => (await fetch(url)).text(),
+    queryFn: async () => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Could not load preview (${response.status})`);
+      return response.text();
+    },
     enabled: isMarkdown(file.name) || isCsv(file.name) || /\.(txt|json)$/i.test(file.name),
   });
+  const [imageFailed, setImageFailed] = useState(false);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -104,7 +128,14 @@ function OutputViewer({ agentId, file }: { agentId: string; file: OutputFile }) 
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 [scrollbar-width:thin]">
         {isImage(file.name) ? (
-          <img src={`${url}?v=${file.modifiedAt}`} alt={file.name} className="w-full rounded-lg border border-border bg-white" />
+          imageFailed ? <p role="status" className="text-sm text-muted-foreground">This image couldn’t be previewed. Use Open or Download to inspect it.</p> : <img src={`${url}?v=${file.modifiedAt}`} alt={file.name} onError={() => setImageFailed(true)} className="w-full rounded-lg border border-border bg-white" />
+        ) : text.isLoading ? (
+          <p role="status" className="flex items-center gap-2 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading preview…</p>
+        ) : text.isError ? (
+          <div role="status" className="py-4 text-sm">
+            <p>The file preview couldn’t be loaded.</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => void text.refetch()}>Try again</Button>
+          </div>
         ) : isMarkdown(file.name) ? (
           <div className="prose-postmortem text-[13.5px]">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{text.data ?? ""}</ReactMarkdown>

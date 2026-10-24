@@ -92,8 +92,8 @@ export interface RouteVerdict {
   intent: Intent;
   instruction: string;
   incidentAction: IncidentAction; // only meaningful when intent is "incident"
-  confidence: number; // share of votes agreeing with the winner
-  votes: { target: string; intent: Intent; count: number }[];
+  confidence: number; // share of requested votes agreeing with the winner
+  votes: { target: string; intent: Intent; count: number; incidentAction?: IncidentAction }[];
   action: "applied" | "clarify" | "ignored";
   ms: number;
   usage: { inputTokens: number; outputTokens: number; costUsd: number };
@@ -104,10 +104,13 @@ export interface Decision {
   question?: string;
 }
 
+export type MicStatus = "stopped" | "connecting" | "listening" | "error";
+
 export type ServerMsg =
-  | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null; missions: MissionView[] }
+  | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null; missions: MissionView[]; tasks: TaskView[] }
   | { type: "agent_event"; id: string; event: AgentEvent; status: AgentStatus; runId: string | null; costUsd: number }
   | { type: "transcript"; text: string; final: boolean }
+  | { type: "mic_state"; status: MicStatus; error?: string }
   | { type: "routing"; utterance: string }
   | { type: "verdict"; verdict: RouteVerdict }
   | { type: "speak"; text: string }
@@ -115,14 +118,25 @@ export type ServerMsg =
   | { type: "telemetry" } // trace data changed: refetch
   | { type: "incident"; incident: IncidentView | null };
 
+export interface CommandContext {
+  template: Template;
+  attachments: string[];
+  plan: boolean;
+  taskId: string | null;
+  uploading: boolean;
+}
+
 export type ClientMsg =
   | { type: "start"; tasks: string[] }
-  | { type: "say"; text: string; template?: Template; attachments?: string[]; plan?: boolean } // attachments: upload ids; plan: plan first
+  | { type: "say"; text: string; template?: Template; attachments?: string[]; plan?: boolean; taskId?: string | null } // taskId: the task being viewed
   | { type: "plan_decision"; missionId: string; decision: "approve" | "revise" | "cancel"; note?: string }
+  | { type: "complete_task"; taskId: string }
   | { type: "cancel_start"; id: string }
   | { type: "mic"; on: boolean }
+  | { type: "command_context"; context: CommandContext }
   | { type: "reset" }
   | { type: "focus"; id: string | null }
+  | { type: "select_task"; id: string | null } // so voice is scoped like typing
   | { type: "direct"; id: string; text: string }
   | { type: "control"; id: string; action: "stop" | "approve" }
   | { type: "approval"; id: string; decision: "approve" | "deny" }
@@ -159,6 +173,7 @@ export interface RunRow {
   workspace: string | null;
   sessionId: string | null;
   parentRunId: string | null; // the run this one continues (e.g. after a mid-run correction)
+  taskId: string | null;
 }
 
 export interface SpanRow {
@@ -179,6 +194,7 @@ export interface RunDetail {
 }
 
 export interface RunsQuery {
+  taskId?: string;
   status?: RunStatus;
   agent?: string;
   q?: string;
@@ -208,7 +224,7 @@ export interface TelemetrySummary {
 
 // --- Missions: plan first, approve, then decide how many agents ---
 
-export type MissionStatus = "planning" | "awaiting_approval" | "allocating" | "running" | "synthesizing" | "done" | "cancelled" | "failed";
+export type MissionStatus = "planning" | "awaiting_approval" | "allocating" | "running" | "synthesizing" | "ready" | "done" | "cancelled" | "failed";
 
 export interface PlanStep {
   id: string; // "S1", "S2", …
@@ -239,6 +255,8 @@ export interface Allocation {
 
 export interface MissionView {
   id: string;
+  title: string; // short, for lists
+  quick: boolean; // started without a plan: one agent, right away
   request: string;
   template: "general" | "coding";
   files: string[];
@@ -250,5 +268,36 @@ export interface MissionView {
   leadAgentId: string | null;
   costUsd: number; // planning + allocation calls (agents report their own cost)
   createdAt: number;
+  endedAt: number | null;
   error: string | null;
+}
+
+// --- Tasks: what the UI is organised around ---
+
+export type TaskStatus = "planning" | "needs_you" | "working" | "ready" | "done" | "stopped" | "failed";
+
+export interface TaskNeed {
+  type: "plan" | "approval" | "completion";
+  label: string;
+  agentId?: string;
+  approvalId?: string;
+}
+
+export interface TaskView {
+  id: string; // the owning mission or incident id
+  kind: "work" | "incident";
+  title: string;
+  request: string;
+  template: Template;
+  files: string[];
+  status: TaskStatus;
+  needs: TaskNeed[];
+  createdAt: number;
+  endedAt: number | null;
+  missionId: string | null;
+  agentIds: string[];
+  resultAgentId: string | null; // whose result and outputs stand for the task
+  result: string | null;
+  branch: string | null; // coding: the branch with the finished work
+  costUsd: number;
 }

@@ -1,8 +1,8 @@
 // Drives a planned mission: sends a task with Plan first, approves the plan by
 // voice when it is ready, and logs the allocation and each agent's progress.
-import WebSocket from "ws";
+import { towerSocket } from "./tower-socket.mjs";
 const [task, template = "coding", seconds = "300"] = process.argv.slice(2);
-const ws = new WebSocket("ws://localhost:8787/ws");
+const ws = await towerSocket();
 const t0 = Date.now();
 const ts = () => `+${((Date.now() - t0) / 1000).toFixed(0).padStart(3)}s`;
 let approved = false;
@@ -25,7 +25,8 @@ ws.on("message", (d) => {
       for (const w of mission.allocation.workstreams) console.log(`      ${w.name}: ${w.stepIds.join(" ")}${w.after.length ? ` after ${w.after}` : ""}`);
       console.log("      synthesis:", mission.allocation.synthesis);
     }
-    if (/done|failed/.test(mission.status)) setTimeout(() => process.exit(0), 1000);
+    if (mission.status === "ready") console.log("      Review the result in the UI, then choose Mark done.");
+    if (/ready|done|failed|cancelled/.test(mission.status)) setTimeout(() => process.exit(0), 1000);
   }
   if (mission.status === "awaiting_approval" && !approved) {
     approved = true;

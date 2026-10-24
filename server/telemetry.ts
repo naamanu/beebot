@@ -68,16 +68,24 @@ export class Telemetry {
       );
     `);
     // Added after the first version of the schema.
-    try {
-      this.db.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
-    } catch {
-      // column already exists
+    for (const column of ["parent_run_id", "task_id"]) {
+      try {
+        this.db.exec(`ALTER TABLE runs ADD COLUMN ${column} TEXT`);
+      } catch {
+        // column already exists
+      }
     }
   }
 
   // Called (throttled) whenever trace data changes, so the UI can refresh.
   onChange(fn: () => void): void {
     this.listeners.add(fn);
+  }
+
+  close(): void {
+    clearTimeout(this.notifyTimer);
+    this.listeners.clear();
+    this.db.close();
   }
 
   private changed(): void {
@@ -93,14 +101,22 @@ export class Telemetry {
     }
   }
 
-  startRun(r: { agentId: string; task: string; model: string; workspace: string; sessionId: string | null; parentRunId: string | null }): string {
+  startRun(r: {
+    taskId: string | null;
+    agentId: string;
+    task: string;
+    model: string;
+    workspace: string;
+    sessionId: string | null;
+    parentRunId: string | null;
+  }): string {
     const id = randomUUID();
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO runs (id, agent_id, task, model, status, started_at, workspace, session_id, parent_run_id) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+        `INSERT INTO runs (id, agent_id, task, model, status, started_at, workspace, session_id, parent_run_id, task_id) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`,
       )
-      .run(id, r.agentId, r.task, r.model, now, r.workspace, r.sessionId, r.parentRunId);
+      .run(id, r.agentId, r.task, r.model, now, r.workspace, r.sessionId, r.parentRunId, r.taskId);
     this.changed();
     return id;
   }
@@ -184,6 +200,10 @@ export class Telemetry {
     if (q.status) {
       where.push("status = ?");
       args.push(q.status);
+    }
+    if (q.taskId) {
+      where.push("task_id = ?");
+      args.push(q.taskId);
     }
     if (q.agent) {
       where.push("agent_id = ?");
@@ -269,6 +289,7 @@ function toRun(r: Record<string, unknown>): RunRow {
     workspace: (r.workspace as string | null) ?? null,
     sessionId: (r.session_id as string | null) ?? null,
     parentRunId: (r.parent_run_id as string | null) ?? null,
+    taskId: (r.task_id as string | null) ?? null,
   };
 }
 

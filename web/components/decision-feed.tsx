@@ -19,7 +19,7 @@ export function DecisionFeed() {
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 [scrollbar-width:thin]">
         {feed.length === 0 ? (
           <p className="text-[13px] leading-relaxed text-muted-foreground">
-            Every instruction is voted on five times. How many votes agree is the confidence: high acts, low asks.
+            See where instructions were sent and how the router voted. Vote agreement describes consistency, not certainty.
           </p>
         ) : (
           <div className="flex flex-col gap-2.5">

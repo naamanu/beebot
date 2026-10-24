@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { ArrowUp, Code2, FileText, Loader2, Mic, Paperclip, Siren, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
 import type { RoutePreview, Template, Upload } from "../../server/types.ts";
@@ -8,6 +8,8 @@ import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatBytesShort } from "@/lib/format";
 import { useTower } from "@/lib/store";
+import { useSelectedTask } from "@/hooks/use-tasks";
+import { agentName, targetLabel } from "@/lib/spans";
 import { cn } from "@/lib/utils";
 
 const TEMPLATES: { id: Template; label: string; icon: React.ComponentType<{ className?: string }>; hint: string }[] = [
@@ -28,19 +30,27 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
   const setDraft = useTower((s) => s.setDraft);
   const send = useTower((s) => s.send);
   const interim = useTower((s) => s.interim);
+  const micStatus = useTower((s) => s.micStatus);
+  const micError = useTower((s) => s.micError);
   const level = useTower((s) => s.levels.at(-1) ?? 0);
   const connected = useTower((s) => s.connected);
   const incident = useTower((s) => s.incident);
   const input = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const preview = usePreview(draft.text, draft.attachments.map((a) => a.name), micOn);
+  const task = useSelectedTask();
+  const selectTask = useTower((s) => s.selectTask);
+  const focused = useTower((s) => s.focused);
+  const reduceMotion = useReducedMotion();
+  const preview = usePreview(draft.text, draft.attachments.map((a) => a.name), micOn, task?.id ?? null, connected);
 
   // ⌘K / Ctrl+K focuses the bar from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        input.current?.focus();
+        const agentInput = document.querySelector<HTMLTextAreaElement>("[data-agent-input]");
+        if (agentInput) agentInput.focus();
+        else if (!document.querySelector('[role="dialog"]')) input.current?.focus();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -51,9 +61,26 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
   useEffect(() => {
     const el = input.current;
     if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
-  }, [draft.text]);
+    const resize = () => {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+      if (!el.value) el.scrollTop = 0;
+    };
+    let width = el.clientWidth;
+    let frame = 0;
+    resize();
+    const observer = new ResizeObserver(() => {
+      if (width === el.clientWidth) return;
+      width = el.clientWidth;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(resize);
+    });
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [draft.text, task?.id, micOn]);
 
   const uploading = draft.attachments.some((a) => a.uploading);
   const canSend = connected && !uploading && (draft.text.trim().length > 0 || draft.attachments.length > 0);
@@ -61,8 +88,16 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
   const submit = () => {
     if (!canSend) return;
     const text = draft.text.trim() || "Analyze the attached files and summarize what matters.";
-    send({ type: "say", text, template: draft.template, attachments: draft.attachments.map((a) => a.id), plan: draft.plan && draft.template !== "incident" });
-    setDraft({ text: "", attachments: [] });
+    const sent = send({
+      type: "say",
+      text,
+      template: draft.template,
+      attachments: draft.attachments.map((a) => a.id),
+      plan: draft.plan && draft.template !== "incident",
+      taskId: task?.id ?? null,
+    });
+    if (sent) setDraft({ text: "", attachments: [] });
+    else toast.error("Instruction not sent. Your draft is saved while reconnecting.");
   };
 
   const addFiles = (files: FileList | File[]) => attachFiles(files, setDraft);
@@ -75,12 +110,14 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
           micOn && "ring-2 ring-span-error/60",
         )}
       >
+        <Confirmation />
+        {micError && <p role="alert" className="px-4 pt-3 text-sm text-span-error">{micError}</p>}
         {draft.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+          <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto px-3 pt-3">
             {draft.attachments.map((a) => (
-              <span key={a.id} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-border bg-secondary/60 pr-1 pl-2 text-xs">
+              <span key={a.id} className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border border-border bg-secondary/60 pr-1 pl-2 text-xs">
                 {a.uploading ? <Loader2 className="size-3.5 animate-spin" /> : <FileText className="size-3.5 text-muted-foreground" />}
-                <span className="max-w-48 truncate">{a.name}</span>
+                <span className="max-w-32 truncate sm:max-w-48">{a.name}</span>
                 <span className="font-mono text-[10.5px] text-muted-foreground">{formatBytesShort(a.size)}</span>
                 <button
                   className="grid size-5 place-items-center rounded hover:bg-accent"
@@ -109,11 +146,11 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   <motion.span
                     aria-hidden
                     className="absolute inset-0 rounded-xl ring-2 ring-span-error"
-                    animate={{ scale: 1 + Math.min(level * 2, 0.3), opacity: 0.3 + Math.min(level * 3, 0.6) }}
+                    animate={reduceMotion ? { scale: 1, opacity: 0.5 } : { scale: 1 + Math.min(level * 2, 0.3), opacity: 0.3 + Math.min(level * 3, 0.6) }}
                     transition={{ duration: 0.08 }}
                   />
                 )}
-                <Mic />
+                {micOn && micStatus === "connecting" ? <Loader2 className="animate-spin" /> : <Mic />}
               </Button>
             </TooltipTrigger>
             <TooltipContent>Click to talk, or hold Space</TooltipContent>
@@ -121,16 +158,19 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
 
           {micOn ? (
             <p className={cn("min-h-9 flex-1 py-2 text-[15px] leading-snug", interim ? "text-foreground" : "text-muted-foreground")}>
-              {interim || "Listening… speak to your agents"}
+              {interim || (micStatus === "listening" ? "Listening… speak to your agents" : "Connecting to speech service…")}
             </p>
           ) : (
             <textarea
+              id="task-command"
+              aria-label={task ? `Message task: ${task.title}` : "Describe a new task"}
+              data-command-input
               ref={input}
               rows={1}
               value={draft.text}
               onChange={(e) => setDraft({ text: e.target.value })}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   submit();
                 }
@@ -142,8 +182,8 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   addFiles(e.clipboardData.files);
                 }
               }}
-              placeholder={placeholder(draft.template, !!incident)}
-              className="min-h-9 flex-1 resize-none bg-transparent py-2 text-[15px] leading-snug outline-none placeholder:text-muted-foreground"
+              placeholder={task ? "Message this task…" : placeholder(draft.template, !!incident)}
+              className="min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[15px] leading-snug outline-none placeholder:text-muted-foreground"
             />
           )}
 
@@ -171,7 +211,20 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-3 py-2">
-          <span className="mr-0.5 text-[11px] text-muted-foreground">New work:</span>
+          {task ? (
+            <>
+              <span className="text-[11px] text-muted-foreground">To:</span>
+              <span className="inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-foreground/20 bg-foreground px-2.5 text-xs text-background sm:max-w-80" title={task.title}>
+                <span className="truncate">{focused ? `${agentName(useTower.getState().agents.find((a) => a.id === focused) ?? { id: focused, role: null })} in ` : ""}{task.title}</span>
+              </span>
+              <button onClick={() => selectTask(null)} className="rounded text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">
+                start a new task instead
+              </button>
+              <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={draft.plan} />
+            </>
+          ) : (
+            <>
+          <span className="mr-0.5 text-[11px] text-muted-foreground">New task:</span>
           {TEMPLATES.map((t) => (
             <Tooltip key={t.id}>
               <TooltipTrigger asChild>
@@ -179,7 +232,7 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   onClick={() => setDraft({ template: t.id })}
                   aria-pressed={draft.template === t.id}
                   className={cn(
-                    "inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
+                    "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-ring",
                     draft.template === t.id
                       ? "border-foreground/20 bg-foreground text-background"
                       : "border-border text-muted-foreground hover:text-foreground",
@@ -200,7 +253,7 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   role="switch"
                   aria-checked={draft.plan}
                   onClick={() => setDraft({ plan: !draft.plan })}
-                  className="ml-1 inline-flex h-6 items-center gap-1.5 rounded-full border border-border px-2 text-xs text-muted-foreground hover:text-foreground"
+                  className="ml-1 inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   <span className={cn("relative h-3.5 w-6 rounded-full transition-colors", draft.plan ? "bg-foreground" : "bg-foreground/20")}>
                     <span className={cn("absolute top-0.5 size-2.5 rounded-full bg-background transition-all", draft.plan ? "left-3" : "left-0.5")} />
@@ -214,6 +267,8 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
             </Tooltip>
           )}
           <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={draft.plan} />
+            </>
+          )}
           <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground md:flex">
             <Kbd>Space</Kbd> talk · <Kbd>⌘K</Kbd> focus · <Kbd>⏎</Kbd> send
           </span>
@@ -244,27 +299,31 @@ function placeholder(template: Template, incidentActive: boolean): string {
 }
 
 // One cheap router vote after you pause typing: where will this go?
-function usePreview(text: string, attachments: string[], micOn: boolean) {
-  const [preview, setPreview] = useState<RoutePreview | "loading" | null>(null);
-  const key = `${text.trim()}|${attachments.join(",")}`;
+function usePreview(text: string, attachments: string[], micOn: boolean, taskId: string | null, connected: boolean) {
+  const [preview, setPreview] = useState<{ key: string; value: RoutePreview | "loading" } | null>(null);
+  const key = JSON.stringify([text.trim(), attachments, taskId]);
   useEffect(() => {
-    if (micOn || text.trim().length < 4) {
+    if (!connected || micOn || text.trim().length < 4) {
       setPreview(null);
       return;
     }
     const ctrl = new AbortController();
     const timer = setTimeout(async () => {
-      setPreview("loading");
+      setPreview({ key, value: "loading" });
       try {
         const res = await fetch("/api/preview", {
           method: "POST",
-          body: JSON.stringify({ text: text.trim(), attachments }),
+          body: JSON.stringify({ text: text.trim(), attachments, taskId }),
           signal: ctrl.signal,
         });
-        if (res.ok) setPreview((await res.json()) as RoutePreview);
+        if (ctrl.signal.aborted) return;
+        if (res.ok) {
+          const value = (await res.json()) as RoutePreview;
+          if (!ctrl.signal.aborted) setPreview({ key, value });
+        }
         else setPreview(null);
       } catch {
-        // superseded by newer text
+        if (!ctrl.signal.aborted) setPreview(null);
       }
     }, 650);
     return () => {
@@ -272,8 +331,8 @@ function usePreview(text: string, attachments: string[], micOn: boolean) {
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, micOn]);
-  return preview;
+  }, [key, micOn, connected]);
+  return connected && !micOn && preview?.key === key ? preview.value : null;
 }
 
 function PreviewLine({
@@ -291,7 +350,7 @@ function PreviewLine({
 }) {
   if (!preview) return null;
   if (preview === "loading") return <span className="ml-2 font-mono text-[11px] text-muted-foreground">→ …</span>;
-  return <span className="ml-2 truncate font-mono text-[11px] text-foreground/80">→ {describe(preview, template, hasFiles, incidentActive, plan)}</span>;
+  return <span className="min-w-0 basis-full truncate font-mono text-[11px] text-muted-foreground" title="Suggested destination; the final routing decision may differ">Suggested: {describe(preview, template, hasFiles, incidentActive, plan)}</span>;
 }
 
 function describe(p: RoutePreview, template: Template, hasFiles: boolean, incidentActive: boolean, plan: boolean): string {
@@ -306,7 +365,58 @@ function describe(p: RoutePreview, template: Template, hasFiles: boolean, incide
     if (plan) return `plan a ${kind} task${hasFiles ? " on the attached files" : ""}, then decide how many agents`;
     return `new ${kind} agent${hasFiles ? " with the attached files" : ""}`;
   }
-  const who = p.target === "all" ? "all agents" : `agent ${p.target}`;
+  const a = useTower.getState().agents.find((x) => x.id === p.target);
+  const who = p.target === "all" ? "all agents" : a ? agentName(a) : `agent ${p.target}`;
   const verb = { assign: "next task", stop: "stop / deny", correct: "correction", approve: "approve", rule: "rule", incident: "incident", chatter: "" }[p.intent];
   return `${who} · ${verb}`;
+}
+
+// What happened to the last instruction, in one line: replaces the old
+// decisions column. Shows the question when the router asks back.
+function Confirmation() {
+  const latest = useTower((s) => s.feed[0]);
+  const agents = useTower((s) => s.agents);
+  const now = useNowTick(1000);
+  if (!latest) return null;
+  const v = latest.verdict;
+  const recent = v?.action === "clarify" || now - latest.at < 8000;
+  if (!recent) return null;
+  const who = (t: string) => {
+    const a = agents.find((x) => x.id === t);
+    return a ? agentName(a) : targetLabel(t);
+  };
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-[12.5px] [&>span]:break-words",
+        v?.action === "clarify" ? "bg-span-http/10 text-foreground" : "text-muted-foreground",
+      )}
+      role="status"
+    >
+      {!v ? (
+        <>
+          <Loader2 className="size-3.5 animate-spin" /> Working out what “{latest.utterance.slice(0, 60)}” means…
+        </>
+      ) : v.action === "clarify" ? (
+        <span className="font-medium text-span-http">{latest.question ?? "Which agent did you mean?"}</span>
+      ) : v.action === "ignored" ? (
+        <span>Heard “{latest.utterance.slice(0, 60)}”, not an instruction, so nothing was sent.</span>
+      ) : (
+        <span>
+          <span className="text-foreground">→ {v.target === "plan" ? "the plan" : v.intent === "assign" && v.target === "new" ? "new task" : who(v.target)}</span> · {v.intent}
+          {v.instruction ? `: ${v.instruction.slice(0, 90)}${v.instruction.length > 90 ? "…" : ""}` : ""}
+        </span>
+      )}
+      {v && <span className="ml-auto shrink-0 font-mono text-[10.5px]" title="Share of returned votes agreeing on the destination and intent; this is not a probability of correctness">{Math.round(v.confidence * 100)}% vote agreement</span>}
+    </div>
+  );
+}
+
+function useNowTick(ms: number) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+  return now;
 }

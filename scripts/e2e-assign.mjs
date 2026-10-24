@@ -1,9 +1,10 @@
 // Sends one utterance and prints what happens for a few seconds.
-import WebSocket from "ws";
+import { towerSocket } from "./tower-socket.mjs";
 const [utterance, seconds = "12"] = process.argv.slice(2);
-const connect = () => new Promise((res, rej) => { const w = new WebSocket("ws://localhost:8787/ws"); w.on("open", () => res(w)); w.on("error", rej); });
+const connect = async () => { const w = await towerSocket(); return new Promise((res, rej) => { w.on("open", () => res(w)); w.on("error", rej); }); };
 let ws;
 for (let i = 0; i < 40 && !ws; i++) { try { ws = await connect(); } catch { await new Promise((r) => setTimeout(r, 250)); } }
+if (!ws) throw new Error("Could not connect to Control Tower.");
 ws.on("message", (d) => {
   const m = JSON.parse(d);
   if (m.type === "state") console.log("state:", m.agents.map((a) => `${a.id}:${a.status} "${a.task.slice(0, 50)}" (${a.events.length} events)`).join(" | ") || "no agents");

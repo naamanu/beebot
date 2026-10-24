@@ -30,6 +30,7 @@ export class RunTracer {
 
   constructor(
     private t: Telemetry,
+    private taskId: string | null,
     private agentId: string,
     private model: string,
     private workspace: string,
@@ -154,7 +155,7 @@ export class RunTracer {
 
   onResult(msg: SDKResultMessage): void {
     if (!this.runId) return;
-    const status = msg.subtype === "success" ? "success" : this.stopping ? "stopped" : "error";
+    const status = this.stopping ? "stopped" : msg.subtype === "success" && !msg.is_error ? "success" : "error";
     // Per-turn usage from the SDK is exact; it replaces the running estimate.
     this.t.setUsage(this.runId, {
       inputTokens: msg.usage.input_tokens,
@@ -179,12 +180,13 @@ export class RunTracer {
   }
 
   // The agent was closed (reset or shutdown) mid-run.
-  abandon(status: "stopped" | "interrupted"): void {
+  abandon(status: "stopped" | "interrupted" | "error"): void {
     if (this.runId) this.close(status);
   }
 
   private open(task: string): string {
     this.runId = this.t.startRun({
+      taskId: this.taskId,
       agentId: this.agentId,
       task,
       model: this.model,
@@ -208,7 +210,7 @@ export class RunTracer {
     return this.runId ?? this.open(this.nextLabel ?? "Continued work");
   }
 
-  private close(status: "stopped" | "interrupted"): void {
+  private close(status: "stopped" | "interrupted" | "error"): void {
     // No SDK result for a cut-off run, so its cost is the chat estimate.
     this.t.finishRun(this.runId!, { status, costUsd: this.estimatedCost });
     this.costAtStart += this.estimatedCost;

@@ -20,6 +20,8 @@ export interface RouterContext {
   incident?: IncidentView | null;
   attachments?: string[]; // names of files attached to this instruction
   pendingPlan?: MissionView | null; // a plan waiting for the operator's approval
+  viewingTask?: string | null; // title of the task the operator has open
+  newTaskMode?: boolean; // no task open: the command bar is starting new work
 }
 
 export class Router {
@@ -32,14 +34,16 @@ export class Router {
     // Ignoring needs stronger agreement than acting: silently dropping a real
     // instruction is worse than asking about it.
     private ignoreThreshold = 0.8,
-  ) {}
+  ) {
+    if (!Number.isInteger(votes) || votes < 1 || votes > 9) throw new Error("ROUTER_VOTES must be an integer between 1 and 9.");
+  }
 
   // One quick vote: what the command bar shows while you type.
   async preview(utterance: string, ctx: RouterContext): Promise<RouteVerdict> {
     return this.route(utterance, ctx, 1);
   }
 
-  async route(utterance: string, ctx: RouterContext, votes = this.votes): Promise<RouteVerdict> {
+  async route(utterance: string, ctx: RouterContext, votes = this.votes, signal?: AbortSignal): Promise<RouteVerdict> {
     const started = Date.now();
     const targets: [string, ...string[]] = [
       "new",
@@ -66,7 +70,7 @@ export class Router {
           max_tokens: 1024,
           output_config: { effort: "low", format: zodOutputFormat(schema) },
           messages: [{ role: "user", content: prompt }],
-        }),
+        }, { signal, timeout: 20_000, maxRetries: 0 }),
       ),
     );
     const usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
@@ -88,23 +92,24 @@ export class Router {
       throw new Error(`All router votes failed: ${reason?.reason?.message ?? "no parseable output"}`);
     }
 
-    // Tally on (target, intent): that pair decides what happens.
-    const tally = new Map<string, { target: string; intent: Intent; count: number; instruction: string }>();
+    // Include the incident action: "declare" and "resolve" are different commands.
+    const tally = new Map<string, { target: string; intent: Intent; incidentAction: IncidentAction; count: number; instruction: string }>();
     for (const b of ballots) {
-      const key = `${b.target}|${b.intent}`;
-      const row = tally.get(key) ?? { target: b.target, intent: b.intent, count: 0, instruction: b.instruction };
+      const incidentAction = b.intent === "incident" ? b.incident_action : "none";
+      const key = `${b.target}|${b.intent}|${incidentAction}`;
+      const row = tally.get(key) ?? { target: b.target, intent: b.intent, incidentAction, count: 0, instruction: b.instruction };
       row.count++;
       tally.set(key, row);
     }
     const ranked = [...tally.values()].sort((a, b) => b.count - a.count);
     const winner = ranked[0]!;
-    const winningBallots = ballots.filter((b) => b.target === winner.target && b.intent === winner.intent);
-    const incidentAction = mode(winningBallots.map((b) => b.incident_action)) as IncidentAction;
-    const confidence = winner.count / ballots.length;
+    // Missing responses do not count as agreement. A failed provider call must
+    // never turn a lone surviving ballot into "100%" confidence.
+    const confidence = winner.count / votes;
 
     const isNoop = winner.intent === "chatter" || winner.target === "none";
     const action: RouteVerdict["action"] =
-      winner.target === "unclear"
+      winner.target === "unclear" || (winner.intent === "incident" && winner.incidentAction === "none")
         ? "clarify"
         : confidence >= (isNoop ? this.ignoreThreshold : this.threshold) ? (isNoop ? "ignored" : "applied") : "clarify";
 
@@ -113,20 +118,14 @@ export class Router {
       target: winner.target,
       intent: winner.intent,
       instruction: winner.instruction,
-      incidentAction: winner.intent === "incident" ? incidentAction : "none",
+      incidentAction: winner.incidentAction,
       confidence,
-      votes: ranked.map(({ target, intent, count }) => ({ target, intent, count })),
+      votes: ranked.map(({ target, intent, count, incidentAction }) => ({ target, intent, count, incidentAction })),
       action,
       ms: Date.now() - started,
       usage,
     };
   }
-}
-
-function mode<T>(xs: T[]): T {
-  const counts = new Map<T, number>();
-  for (const x of xs) counts.set(x, (counts.get(x) ?? 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]![0];
 }
 
 // A clarifying question built from the vote split itself, so it names the
@@ -135,6 +134,9 @@ export function clarifyingQuestion(v: RouteVerdict, agents: AgentView[]): string
   const label = (t: string) =>
     t === "all" ? "all agents" : t === "none" ? "nobody" : t === "new" ? "a new agent" : t === "plan" ? "the plan" : `agent ${t}`;
   const [a, b] = v.votes;
+  if (a?.intent === "incident" && b?.intent === "incident" && a.incidentAction !== b.incidentAction) {
+    return "Should I declare a new incident, or update the current incident’s status? Please name the action.";
+  }
   if (a?.target === "unclear") return "Which agent was that for, and what should it do?";
   const isNoop = (x: { target: string; intent: Intent }) => x.target === "none" || x.target === "unclear" || x.intent === "chatter";
   // Torn between "nobody" and an agent: ask about the agent.
@@ -189,7 +191,15 @@ function buildPrompt(utterance: string, ctx: RouterContext): string {
 <agents>
 ${agents || "(no agents yet: anything that sounds like work to do is an assign to a new agent)"}
 </agents>
-${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}${planBlock(ctx.pendingPlan)}${
+${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}${
+  ctx.viewingTask
+    ? `\nThe operator has the task “${ctx.viewingTask}” open; the agents listed are that task's. An instruction is for them unless the operator clearly asks for new, separate work (then target "new").\n`
+    : ""
+}${
+  ctx.newTaskMode
+    ? `\nNo task is open: the operator is starting NEW work. Unless they name an existing agent (by number or name), answer a waiting plan or approval, set a rule, or talk about the incident, this is an assign with target "new" — even if an existing agent has related files or context.\n`
+    : ""
+}${planBlock(ctx.pendingPlan)}${
   ctx.attachments?.length
     ? `\nThe operator attached files to this instruction: ${ctx.attachments.join(", ")}. Starting work on them is an assign (target "new" unless they name an agent).\n`
     : ""

@@ -15,13 +15,14 @@ import { RunStatusPill } from "./run-status";
 
 const STATUSES: (RunStatus | "all")[] = ["all", "running", "success", "error", "stopped", "interrupted"];
 
-export function RunsPage() {
+export function RunsPage({ taskId = null }: { taskId?: string | null }) {
   const [status, setStatus] = useState<RunStatus | "all">("all");
   const [agent, setAgent] = useState("all");
   const [search, setSearch] = useState("");
   const q = useDeferredValue(search);
   const summary = useSummary().data;
-  const runs = useRuns({ status: status === "all" ? undefined : status, agent: agent === "all" ? undefined : agent, q }).data ?? [];
+  const runs =
+    useRuns({ status: status === "all" ? undefined : status, agent: agent === "all" ? undefined : agent, q, taskId: taskId ?? undefined }).data ?? [];
   const allRuns = useRuns({}).data ?? [];
   const agentIds = [...new Set(allRuns.map((r) => r.agentId))].sort((a, b) => Number(a) - Number(b));
   const now = useNow(5000);
@@ -75,7 +76,12 @@ export function RunsPage() {
         <div className="flex min-h-0 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
           {/* Filters: one row, above the data */}
           <div className="flex flex-wrap items-center gap-2 border-b border-border p-3">
-            <h2 className="mr-2 pl-1 text-base">All runs</h2>
+            <h2 className="mr-2 pl-1 text-base">{taskId ? "Runs for this task" : "All runs"}</h2>
+            {taskId && (
+              <button className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => navigate("/runs")}>
+                show all
+              </button>
+            )}
             <ToggleGroup
               type="single"
               variant="outline"

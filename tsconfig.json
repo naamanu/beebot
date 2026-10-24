@@ -26,6 +26,7 @@
   },
   "include": [
     "server",
-    "web"
+    "web",
+    "tests"
   ]
 }

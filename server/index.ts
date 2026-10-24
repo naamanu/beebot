@@ -5,17 +5,25 @@ import { createServer } from "node:http";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
+import { ZodError } from "zod";
+import { ControlAccess } from "./access.ts";
 import { Agent, type AgentSnapshot } from "./agents.ts";
 import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
 import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
 import { writePostmortem } from "./incident/postmortem.ts";
-import { Mission, type SpawnRequest } from "./missions/mission.ts";
+import { Mission, fallbackTitle, type SpawnRequest } from "./missions/mission.ts";
+import { shortTitle } from "./missions/title.ts";
+import { recoverAgent, recoverMission } from "./missions/recovery.ts";
+import { buildTasks } from "./tasks.ts";
+import { OperatorInput } from "./operator.ts";
+import { writeJsonAtomic } from "./persistence.ts";
+import { clientMessageSchema, HttpError, parseJson, previewSchema } from "./protocol.ts";
 import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { Approval, ClientMsg, Decision, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
-import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, repoFiles, type Run } from "./workspace.ts";
+import type { Approval, Decision, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
+import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, nextAgentId, repoFiles, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 8787);
@@ -23,18 +31,22 @@ const AGENT_MODEL = process.env.AGENT_MODEL || "claude-opus-5-5";
 const ROUTER_MODEL = process.env.ROUTER_MODEL || "claude-haiku-5-5";
 const ROUTER_VOTES = Number(process.env.ROUTER_VOTES || 5);
 
-const SESSION_FILE = join(ROOT, "data", "session.json");
-const UPLOADS = join(ROOT, "data", "uploads");
+const DATA = process.env.CONTROL_TOWER_DATA_DIR ?? join(ROOT, "data");
+const WORK = process.env.CONTROL_TOWER_WORK_DIR ?? ROOT;
+const SESSION_FILE = join(DATA, "session.json");
+const UPLOADS = join(DATA, "uploads");
 const UNDO_MS = 4000; // a new agent can be cancelled for this long before it starts
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const TEMPLATE = join(ROOT, "demo", "template");
 
-const rules = new RuleBook(join(ROOT, "data", "rules.json"));
-const telemetry = new Telemetry(join(ROOT, "data", "telemetry.db"));
+const rules = new RuleBook(join(DATA, "rules.json"));
+const telemetry = new Telemetry(join(DATA, "telemetry.db"));
 telemetry.onChange(() => broadcast({ type: "telemetry" }));
 const router = new Router(ROUTER_MODEL, ROUTER_VOTES);
 const jamie = new Jamie(process.env.JAMIE_API_KEY);
 const clients = new Set<WebSocket>();
+const access = new ControlAccess(process.env.CONTROL_TOWER_UI_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean));
+let session = new AbortController();
 
 let run: Run | null = null;
 let agents: Agent[] = [];
@@ -57,11 +69,19 @@ function broadcast(msg: ServerMsg): void {
 }
 
 function missionViews(): MissionView[] {
-  return [...missions.map((m) => m.view()), ...archivedMissions].slice(0, 10);
+  return [...missions.map((m) => m.view()), ...archivedMissions];
+}
+
+function tasks() {
+  return buildTasks(
+    agents.map((a) => a.view()),
+    missionViews(),
+    incident?.view() ?? null,
+  );
 }
 
 function state(): ServerMsg {
-  return { type: "state", agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
+  return { type: "state", tasks: tasks(), agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
 }
 
 // --- Session persistence: the server can restart without losing agents. ---
@@ -78,14 +98,19 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 function save(): void {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveNow, 300);
+  saveTimer = setTimeout(() => {
+    try { saveNow(); }
+    catch (error) {
+      console.error("Could not save the session:", error);
+      broadcast({ type: "notice", level: "error", text: "The session could not be saved. Check available disk space and directory permissions." });
+    }
+  }, 300);
 }
 
 function saveNow(): void {
   clearTimeout(saveTimer);
   const data: SavedSession = { run, agents: agents.map((a) => a.snapshot()), decisions, recent: recent.slice(-10), missions: missionViews() };
-  mkdirSync(dirname(SESSION_FILE), { recursive: true });
-  writeFileSync(SESSION_FILE, JSON.stringify(data));
+  writeJsonAtomic(SESSION_FILE, data);
 }
 
 function makeAgent(
@@ -97,6 +122,7 @@ function makeAgent(
   template?: Template,
   mission?: { id: string; role: string; title?: string },
 ): Agent {
+  const signal = session.signal;
   const t = template ?? restore?.template;
   return new Agent({
     mission,
@@ -111,47 +137,63 @@ function makeAgent(
     telemetry,
     workspace: run?.dir ?? "",
     rules: () => rules.asPrompt(),
+    onStatus: () => {
+      if (!signal.aborted) { broadcast(state()); save(); }
+    },
+    onFinished: (agentId, ok) => {
+      if (signal.aborted || !mission) return;
+      missions.find((candidate) => candidate.id === mission.id)?.onAgentFinished(agentId, ok);
+    },
     onEvent: (agentId, event, status) => {
+      if (signal.aborted) return;
       const agent = agents.find((a) => a.id === agentId);
       broadcast({ type: "agent_event", id: agentId, event, status, runId: agent?.runId ?? null, costUsd: agent?.costUsd ?? 0 });
-      // A mission's agent finished: let the mission start what comes next.
-      const missionId = agent?.view().missionId;
-      if (missionId && (event.kind === "result" || (event.kind === "error" && status !== "working"))) {
-        missions.find((m) => m.id === missionId)?.onAgentFinished(agentId, event.kind === "result");
-      }
       save();
     },
   });
 }
 
 function restoreSession(): void {
-  if (!existsSync(SESSION_FILE)) return;
+  if (!existsSync(SESSION_FILE)) { telemetry.closeOrphans(new Set()); return; }
   try {
     const saved = JSON.parse(readFileSync(SESSION_FILE, "utf8")) as SavedSession;
-    if (saved.run && !existsSync(saved.run.repo)) return; // workspace was deleted
+    if (saved.run && !existsSync(saved.run.repo)) { telemetry.closeOrphans(new Set()); return; }
     run = saved.run;
     decisions = saved.decisions ?? [];
     recent = saved.recent ?? [];
+    const taskIds = new Set((saved.missions ?? []).map((m) => m.id));
     // Incident agents can't come back: their simulated production is gone.
     agents = saved.agents
-      .filter((a) => existsSync(a.cwd) && a.template !== "incident")
-      .map((a) => makeAgent(a.id, a.task, a.cwd, a, a.mission?.role, undefined, a.mission));
+      .filter((a) => a.mission && taskIds.has(a.mission.id) && existsSync(a.cwd) && a.template !== "incident")
+      .map((a) => {
+        a = recoverAgent(a);
+        return makeAgent(a.id, a.task, a.cwd, a, a.mission?.role, undefined, a.mission);
+      });
     // Missions that were mid-flight can't resume their orchestration.
-    archivedMissions = (saved.missions ?? []).map((m) =>
-      /done|cancelled|failed/.test(m.status) ? m : { ...m, status: "failed", error: "The server restarted before this task finished." },
-    );
-    // Agents that were mid-task when the server stopped carry on by themselves.
-    const interrupted = agents.filter((a) => a.status === "working" || a.status === "starting");
-    for (const a of interrupted) a.resumeAfterRestart();
-    // Runs that were in flight and aren't being resumed are marked interrupted.
-    telemetry.closeOrphans(new Set(agents.flatMap((a) => (a.runId ? [a.runId] : []))));
-    console.log(`Restored ${agents.length} agent(s) from the last session (${interrupted.length} resumed).`);
+    archivedMissions = (saved.missions ?? []).map((m) => recoverMission(m, agents.map((agent) => agent.view())));
+    // Missions saved before short titles existed get one now.
+    const signal = session.signal;
+    for (const m of archivedMissions.filter((x) => !x.title)) {
+      m.title = fallbackTitle(m.request);
+      void shortTitle(m.request, signal).then((t) => {
+        if (!t || signal.aborted) return;
+        m.title = t;
+        broadcast(state());
+        save();
+      });
+    }
+    telemetry.closeOrphans(new Set());
+    console.log(`Restored ${archivedMissions.length} task(s) with ${agents.length} agent(s).`);
   } catch (err) {
     console.warn(`Could not restore the last session: ${(err as Error).message}`);
+    telemetry.closeOrphans(new Set());
   }
 }
 
 function resetSession(): void {
+  session.abort();
+  session = new AbortController();
+  for (const mission of missions) mission.cancel();
   for (const a of agents) a.close("reset");
   agents = [];
   missions = [];
@@ -165,10 +207,10 @@ function resetSession(): void {
   broadcast(state());
 }
 
-function startSession(tasks: string[]): void {
+function startSession(demoTasks: string[]): void {
   resetSession();
-  for (const task of tasks) spawnAgent(task, { quiet: true });
-  broadcast({ type: "notice", level: "info", text: `Started ${agents.length} agents in ${run!.dir}` });
+  for (const task of demoTasks) createMission(task, "coding", [], { quick: true });
+  broadcast({ type: "notice", level: "info", text: `Started ${demoTasks.length} demo tasks` });
 }
 
 interface AttachedFile extends Upload {
@@ -210,12 +252,13 @@ function spawnAgent(
     undo = false,
     mission = undefined as { id: string; role: string; title?: string } | undefined,
     inputsFrom = [] as SpawnRequest["inputsFrom"],
-    baseAgentId = null as string | null,
+    baseAgentIds = [] as string[],
   } = {},
 ): Agent {
-  run ??= createRun(ROOT, TEMPLATE);
-  const id = String(agents.reduce((max, a) => Math.max(max, Number(a.id)), 0) + 1);
-  const cwd = template === "general" ? addScratchDir(run, id) : addWorktree(run, id, baseAgentId);
+  if (!mission) throw new Error("Agents must be created within a task.");
+  run ??= createRun(WORK, TEMPLATE);
+  const id = nextAgentId(run);
+  const cwd = template === "general" ? addScratchDir(run, id) : addWorktree(run, id, baseAgentIds);
   if (template === "general") mkdirSync(join(cwd, "outputs"), { recursive: true });
   // Another agent's outputs, for work that builds on it.
   for (const from of inputsFrom) {
@@ -247,7 +290,8 @@ function readHead(path: string): string | null {
   return lines.length > 20 ? `[first 20 of ${lines.length} lines]\n${head}` : head;
 }
 
-function createMission(request: string, template: "general" | "coding", files: AttachedFile[]): Mission {
+function createMission(request: string, template: "general" | "coding", files: AttachedFile[], { quick = false } = {}): Mission {
+  const signal = session.signal;
   const mission = new Mission(
     {
       template,
@@ -256,25 +300,33 @@ function createMission(request: string, template: "general" | "coding", files: A
       repoFiles: template === "coding" ? repoFiles(TEMPLATE) : [],
     },
     {
-      spawn: (m, req) =>
-        spawnAgent(req.task, {
+      spawn: (m, req) => {
+        if (signal.aborted) throw new Error("The session was reset.");
+        return spawnAgent(req.task, {
           quiet: true,
           template: m.template,
           files,
-          mission: { id: m.id, role: req.role, title: req.title },
+          mission: { id: m.id, role: req.role ?? "", title: req.title },
+          undo: req.undo,
           inputsFrom: req.inputsFrom,
-          baseAgentId: req.baseAgentId,
-        }).id,
+          baseAgentIds: req.baseAgentIds,
+        }).id;
+      },
+      stop: (id, reason) => agents.find((agent) => agent.id === id)?.close("reset", reason),
       changed: () => {
+        if (signal.aborted) return;
         broadcast(state());
         save();
       },
-      speak: (text) => broadcast({ type: "speak", text }),
+      speak: (text) => { if (!signal.aborted) broadcast({ type: "speak", text }); },
     },
   );
-  missions = [mission, ...missions].slice(0, 10);
+  missions = [mission, ...missions];
+  if (quick) mission.startQuick();
+  else void mission.start();
   save();
-  void mission.start();
+  // A short title for the task list arrives a moment later.
+  void shortTitle(request, signal).then((t) => { if (t && !signal.aborted && mission.status !== "cancelled") mission.setTitle(t); });
   return mission;
 }
 
@@ -285,9 +337,28 @@ function decidePlan(missionId: string | null, decision: "approve" | "revise" | "
   else if (decision === "revise") void mission.revise(note);
   else {
     mission.cancel();
-    // Cancelling a running mission stops its agents too.
-    for (const a of agents) if (a.view().missionId === mission.id && a.status === "working") void a.stop("Task cancelled");
   }
+}
+
+function completeTask(taskId: string): void {
+  const task = tasks().find((candidate) => candidate.id === taskId);
+  if (!task) throw new Error("This task is no longer available.");
+  if (task.status === "done") return;
+  if (task.status !== "ready") throw new Error("The task is not ready to finish. All required agents must finish and pending approvals must be resolved first.");
+  if (task.kind === "incident") setIncidentStatus("resolved", "commander");
+  else {
+    const mission = missions.find((candidate) => candidate.id === taskId);
+    if (mission) {
+      if (!mission.complete()) throw new Error("The task is not ready to finish.");
+    } else {
+      const archived = archivedMissions.find((candidate) => candidate.id === taskId);
+      if (!archived || archived.status !== "ready") throw new Error("The task is not ready to finish.");
+      archived.status = "done";
+      archived.endedAt = Date.now();
+    }
+  }
+  save();
+  broadcast(state());
 }
 
 function cancelStart(id: string): void {
@@ -295,6 +366,8 @@ function cancelStart(id: string): void {
   if (!agent?.cancelStart()) return;
   agent.close("reset");
   agents = agents.filter((a) => a !== agent);
+  // A quick task whose only agent was cancelled disappears with it.
+  missions = missions.filter((m) => !(m.quick && m.view().workers.every((w) => w.agentId === id)));
   broadcast(state());
   broadcast({ type: "notice", level: "info", text: `Cancelled agent ${id} before it started.` });
   save();
@@ -306,9 +379,9 @@ function declareIncident(title: string): void {
   resetSession();
   incident = new Incident(title, "SEV1", jamie, () => broadcastIncident());
   callNotes = null;
-  run = createRun(ROOT, TEMPLATE);
+  run = createRun(WORK, TEMPLATE);
   for (const role of INCIDENT_ROLES) {
-    const id = String(agents.length + 1);
+    const id = nextAgentId(run);
     const agent = makeAgent(id, `${role.task} Incident: ${title}.`, addScratchDir(run, id), undefined, role.name);
     agents.push(agent);
     agent.begin();
@@ -369,26 +442,37 @@ interface HearOptions {
   template?: Template;
   files?: AttachedFile[];
   plan?: boolean; // plan first, then decide how many agents
+  taskId?: string | null; // the task the operator is looking at
 }
 
 function hear(utterance: string, focused: string | null, opts: HearOptions = {}): void {
-  routing = routing.then(() => routeAndApply(utterance, focused, opts)).catch((err) => {
-    broadcast({ type: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
+  const signal = session.signal;
+  routing = routing.then(() => {
+    if (!signal.aborted) return routeAndApply(utterance, focused, opts, signal);
+  }).catch((err) => {
+    if (!signal.aborted) broadcast({ type: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
   });
 }
 
-async function routeAndApply(utterance: string, focused: string | null, opts: HearOptions): Promise<void> {
+async function routeAndApply(utterance: string, focused: string | null, opts: HearOptions, signal: AbortSignal): Promise<void> {
   broadcast({ type: "routing", utterance });
+  // Viewing a task: instructions are about its agents (and its plan).
+  const task = opts.taskId ? tasks().find((t) => t.id === opts.taskId) : undefined;
+  if (opts.taskId && !task) throw new Error("This task is no longer available. Select a task or start a new one.");
+  const scoped = task ? agents.filter((a) => task.agentIds.includes(a.id)) : agents;
   const verdict = await router.route(utterance, {
-    agents: agents.map((a) => a.view()),
+    agents: scoped.map((a) => a.view()),
+    viewingTask: task ? task.title : null,
+    newTaskMode: !task,
     rules: rules.list(),
     recent: recent.slice(-4),
     pendingClarification,
-    focused,
+    focused: scoped.some((a) => a.id === focused) ? focused : null,
     incident: incident?.view() ?? null,
     attachments: opts.files?.map((f) => f.name),
-    pendingPlan: missions.find((m) => m.status === "awaiting_approval")?.view() ?? null,
-  });
+    pendingPlan: (task?.missionId ? missions.find((m) => m.id === task.missionId && m.status === "awaiting_approval") : missions.find((m) => m.status === "awaiting_approval"))?.view() ?? null,
+  }, undefined, signal);
+  if (signal.aborted) return;
   recent.push(utterance);
   telemetry.recordDecision(verdict);
 
@@ -405,7 +489,7 @@ async function routeAndApply(utterance: string, focused: string | null, opts: He
   if (verdict.action === "applied") pendingClarification = null;
   remember({ verdict });
   broadcast({ type: "verdict", verdict });
-  if (verdict.action === "applied") await apply(verdict, opts);
+  if (verdict.action === "applied") await apply(verdict, opts, signal);
 }
 
 function remember(d: Decision): void {
@@ -413,7 +497,9 @@ function remember(d: Decision): void {
   save();
 }
 
-async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
+async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): Promise<void> {
+  const task = opts.taskId ? tasks().find((t) => t.id === opts.taskId) : undefined;
+  const scoped = task ? agents.filter((a) => task.agentIds.includes(a.id)) : agents;
   if (v.intent === "incident") {
     if (v.incidentAction === "declare") declareIncident(v.instruction || "Production incident");
     else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
@@ -421,14 +507,15 @@ async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
   }
   // A plan is waiting for approval and this answers it.
   if (v.target === "plan") {
-    if (v.intent === "approve") decidePlan(null, "approve");
-    else if (v.intent === "stop") decidePlan(null, "cancel");
-    else decidePlan(null, "revise", v.instruction || v.utterance);
+    const missionId = opts.taskId && missions.some((m) => m.id === opts.taskId) ? opts.taskId : null;
+    if (v.intent === "approve") decidePlan(missionId, "approve");
+    else if (v.intent === "stop") decidePlan(missionId, "cancel");
+    else decidePlan(missionId, "revise", v.instruction || v.utterance);
     return;
   }
   incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
   // Yes or no to an agent that is waiting for approval.
-  const waiting = agents.filter((a) => a.approval && (v.target === a.id || v.target === "all"));
+  const waiting = scoped.filter((a) => a.approval && (v.target === a.id || v.target === "all"));
   if ((v.intent === "approve" || v.intent === "stop") && waiting.length) {
     for (const a of waiting) {
       a.traceRouter(v);
@@ -446,18 +533,19 @@ async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
     broadcast(state());
     return;
   }
-  if (v.intent === "assign" && (v.target === "new" || agents.length === 0)) {
+  if (v.intent === "stop" && v.target === "all" && task?.missionId) {
+    decidePlan(task.missionId, "cancel");
+    return;
+  }
+  if (v.intent === "assign" && v.target !== "all") {
     // With the Incident chip selected and no incident yet, new work starts one.
     if (opts.template === "incident" && !incident) {
       declareIncident(v.instruction);
       return;
     }
-    const template = opts.template === "general" || opts.files?.length ? "general" : "coding";
-    if (opts.plan) {
-      createMission(v.instruction, template, opts.files ?? []);
-      return;
-    }
-    spawnAgent(v.instruction, { template, files: opts.files, undo: true }).traceRouter(v);
+    const kind = scoped.find((a) => a.id === v.target)?.template ?? opts.template ?? "general";
+    const template = kind === "general" || opts.files?.length ? "general" : "coding";
+    createMission(v.instruction, template, opts.files ?? [], { quick: opts.plan === false });
     return;
   }
   // Files attached to an instruction for an existing agent go into its workspace.
@@ -465,13 +553,13 @@ async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
     const target = agents.find((a) => a.id === v.target);
     if (target) v = { ...v, instruction: v.instruction + attach(opts.files, target.cwd, target.template === "general" ? "inputs" : "attachments") };
   }
-  const targets = v.target === "all" ? agents : agents.filter((a) => a.id === v.target);
+  const targets = v.target === "all" ? scoped : scoped.filter((a) => a.id === v.target);
   for (const a of targets) {
+    if (signal.aborted) return;
     if (v.intent !== "assign") a.traceRouter(v); // assign opens a fresh run; trace it there
     if (v.intent === "assign") {
       // One task for everyone makes no sense; "all" + assign is treated as a correction.
-      if (v.target === "all") a.correct(v.instruction);
-      else a.assign(v.instruction);
+      a.correct(v.instruction);
       a.traceRouter(v);
       continue;
     }
@@ -506,12 +594,22 @@ const RUN_STATUSES = new Set<RunStatus>(["running", "success", "error", "stopped
 
 // Read-only JSON API for the Runs page.
 const http = createServer((req, res) => {
-  const url = new URL(req.url ?? "/", "http://localhost");
   const json = (status: number, body: unknown) => {
-    res.writeHead(status, { "content-type": "application/json" });
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
     res.end(JSON.stringify(body));
   };
-  const fail = (err: unknown) => json(500, { error: err instanceof Error ? err.message : String(err) });
+  const fail = (err: unknown) => {
+    if (res.headersSent) { res.destroy(); return; }
+    json(err instanceof HttpError ? err.status : err instanceof ZodError || err instanceof SyntaxError ? 400 : 500, { error: err instanceof Error ? err.message : String(err) });
+  };
+  try {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  if (url.pathname === "/api/session") {
+    return access.bootstrap(req, res) ? json(200, { ok: true }) : json(403, { error: "Session bootstrap requires a trusted local request." });
+  }
+  if (url.pathname.startsWith("/api/") && !access.authenticated(req)) {
+    return json(401, { error: "Open the Control Tower UI to establish a local session." });
+  }
   if (url.pathname === "/api/uploads" || url.pathname === "/api/preview" || url.pathname.startsWith("/api/agents/")) {
     void workApi(req, res, url, json).catch(fail);
     return;
@@ -528,6 +626,7 @@ const http = createServer((req, res) => {
       telemetry.listRuns({
         status: status && RUN_STATUSES.has(status) ? status : undefined,
         agent: url.searchParams.get("agent") || undefined,
+        taskId: url.searchParams.get("taskId") || undefined,
         q: url.searchParams.get("q") || undefined,
         limit: Math.min(Number(url.searchParams.get("limit")) || 200, 1000),
       }),
@@ -540,15 +639,22 @@ const http = createServer((req, res) => {
   }
   res.writeHead(200, { "content-type": "text/plain" });
   res.end("Control Tower server. Open the web UI at http://localhost:5173\n");
+  } catch (error) { fail(error); }
 });
 
-const wss = new WebSocketServer({ server: http, path: "/ws" });
+const wss = new WebSocketServer({
+  server: http,
+  path: "/ws",
+  maxPayload: 1024 * 1024,
+  verifyClient: ({ req }: { req: import("node:http").IncomingMessage }) => access.authenticated(req),
+});
 
 wss.on("connection", (ws) => {
   clients.add(ws);
   let mic: Reson8Turns | null = null;
-  let focused: string | null = null; // agent this tab has open full-screen
-  const send = (m: ServerMsg) => ws.send(JSON.stringify(m));
+  const drainingMics = new Set<Reson8Turns>();
+  const operator = new OperatorInput();
+  const send = (m: ServerMsg) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(m)); };
   send(state());
 
   ws.on("message", (data, isBinary) => {
@@ -556,7 +662,8 @@ wss.on("connection", (ws) => {
       mic?.send(data as Buffer);
       return;
     }
-    const msg = JSON.parse(data.toString()) as ClientMsg;
+    try {
+    const msg = clientMessageSchema.parse(parseJson(data.toString()));
     switch (msg.type) {
       case "start":
         try {
@@ -566,30 +673,62 @@ wss.on("connection", (ws) => {
         }
         break;
       case "say":
-        if (msg.text.trim()) hear(msg.text.trim(), focused, { template: msg.template, files: resolveUploads(msg.attachments), plan: msg.plan });
+        if (msg.text.trim())
+          hear(msg.text.trim(), operator.focused, { template: msg.template, files: resolveUploads(msg.attachments), plan: msg.plan, taskId: msg.taskId });
+        break;
+      case "command_context":
+        operator.context = msg.context;
         break;
       case "mic":
         if (msg.on && !mic) {
           const key = process.env.RESON8_API_KEY;
           if (!key) {
-            send({ type: "notice", level: "error", text: "RESON8_API_KEY is not set in .env" });
+            send({ type: "mic_state", status: "error", error: "Voice is unavailable: RESON8_API_KEY is not set in .env." });
             break;
           }
-          mic = new Reson8Turns(key, phrases(), {
-            onInterim: (text) => broadcast({ type: "transcript", text, final: false }),
-            onTurn: (text) => {
-              broadcast({ type: "transcript", text, final: true });
-              hear(text, focused);
+          send({ type: "mic_state", status: "connecting" });
+          let signal = session.signal;
+          const captureTurn = () => { operator.beginVoiceTurn(); return operator.endVoiceTurn(); };
+          let turn = captureTurn();
+          const current = new Reson8Turns(key, phrases(), {
+            onReady: () => { if (mic === current) send({ type: "mic_state", status: "listening" }); },
+            onClose: () => {
+              drainingMics.delete(current);
+              if (mic !== current) return;
+              mic = null;
+              send({ type: "mic_state", status: "stopped" });
             },
-            onError: (text) => send({ type: "notice", level: "error", text }),
-          });
+            onTurnStart: () => { signal = session.signal; turn = captureTurn(); },
+            onInterim: (text) => { if (!signal.aborted) send({ type: "transcript", text, final: false }); },
+            onTurn: (text) => {
+              if (signal.aborted || ws.readyState !== ws.OPEN) return;
+              send({ type: "transcript", text, final: true });
+              if (turn.context.uploading) {
+                send({ type: "notice", level: "error", text: "Wait for the file uploads to finish, then repeat the instruction." });
+                return;
+              }
+              hear(text, turn.focused, { template: turn.context.template, plan: turn.context.plan, taskId: turn.context.taskId, files: resolveUploads(turn.context.attachments) });
+            },
+            onError: (error) => {
+              drainingMics.delete(current);
+              if (mic && mic !== current) return;
+              mic = null;
+              send({ type: "mic_state", status: "error", error });
+            },
+          }, process.env.RESON8_TURNS_URL);
+          mic = current;
         } else if (!msg.on && mic) {
+          drainingMics.add(mic);
           mic.close();
           mic = null;
+          send({ type: "mic_state", status: "stopped" });
         }
         break;
       case "focus":
-        focused = msg.id;
+        operator.focused = msg.id;
+        break;
+      case "select_task":
+        operator.context.taskId = msg.id;
         break;
       case "direct": {
         // Typed straight into an open agent: no routing needed.
@@ -608,6 +747,9 @@ wss.on("connection", (ws) => {
         break;
       case "plan_decision":
         decidePlan(msg.missionId, msg.decision, msg.note);
+        break;
+      case "complete_task":
+        completeTask(msg.taskId);
         break;
       case "cancel_start":
         cancelStart(msg.id);
@@ -628,17 +770,33 @@ wss.on("connection", (ws) => {
         broadcast(state());
         break;
     }
+    } catch (error) {
+      send({ type: "notice", level: "error", text: error instanceof ZodError ? "Invalid control message. Check its type and fields." : error instanceof Error ? error.message : String(error) });
+    }
   });
+
+  const abortMics = () => {
+    mic?.abort();
+    mic = null;
+    for (const current of drainingMics) current.abort();
+    drainingMics.clear();
+  };
+  ws.on("error", abortMics);
 
   ws.on("close", () => {
     clients.delete(ws);
-    mic?.close();
+    abortMics();
   });
 });
 
 async function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let size = 0;
+  for await (const c of req.iterator({ destroyOnReturn: false })) {
+    size += (c as Buffer).length;
+    if (size > 1024 * 1024) { req.resume(); throw new HttpError(413, "JSON requests must be at most 1 MB."); }
+    chunks.push(c as Buffer);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -679,10 +837,15 @@ async function workApi(
     return json(200, upload);
   }
   if (url.pathname === "/api/preview" && req.method === "POST") {
-    const { text, attachments } = JSON.parse(await readBody(req)) as { text: string; attachments?: string[] };
+    const { text, attachments, taskId } = previewSchema.parse(parseJson(await readBody(req)));
+    const task = taskId ? tasks().find((t) => t.id === taskId) : undefined;
+    if (taskId && !task) throw new HttpError(404, "Task not found.");
+    const scoped = task ? agents.filter((a) => task.agentIds.includes(a.id)) : agents;
     const v = await router.preview(text, {
-      pendingPlan: missions.find((m) => m.status === "awaiting_approval")?.view() ?? null,
-      agents: agents.map((a) => a.view()),
+      pendingPlan: (task?.missionId ? missions.find((m) => m.id === task.missionId && m.status === "awaiting_approval") : missions.find((m) => m.status === "awaiting_approval"))?.view() ?? null,
+      viewingTask: task?.title ?? null,
+      newTaskMode: !task,
+      agents: scoped.map((a) => a.view()),
       rules: rules.list(),
       recent: recent.slice(-4),
       pendingClarification,
@@ -708,8 +871,12 @@ async function workApi(
   }
   const file = join(dir, basename(decodeURIComponent(m[2]))); // basename: no escaping the folder
   if (!existsSync(file)) return json(404, { error: "no such output" });
-  res.writeHead(200, { "content-type": CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" });
-  createReadStream(file).pipe(res);
+  res.writeHead(200, {
+    "content-type": CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+  });
+  createReadStream(file).on("error", () => res.destroy()).pipe(res);
 }
 
 function statOf(path: string) {
@@ -737,23 +904,30 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
   }
   if (!incident) return json(404, { error: "no active incident" });
   if (url.pathname === "/api/incident/jamie" && req.method === "POST") {
-    const { meetingId } = JSON.parse(await readBody(req)) as { meetingId: string };
-    callNotes = await jamie.get(meetingId);
-    incident.jamieMeetingId = meetingId;
-    incident.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
+    const { meetingId } = parseJson(await readBody(req)) as { meetingId: string };
+    if (typeof meetingId !== "string" || !meetingId.trim()) throw new HttpError(400, "meetingId is required.");
+    const current = incident;
+    const notes = await jamie.get(meetingId);
+    if (incident !== current) throw new HttpError(409, "The incident changed while the notes were loading.");
+    callNotes = notes;
+    current.jamieMeetingId = meetingId;
+    current.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
     return json(200, { title: callNotes.title });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "GET") {
     return json(200, { markdown: incident.postmortem });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "POST") {
-    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= incident!.declaredAt - 5000);
-    incident.postmortem = await writePostmortem(incident, runs, callNotes);
+    const current = incident;
+    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= current.declaredAt - 5000);
+    const markdown = await writePostmortem(current, runs, callNotes);
+    if (incident !== current) throw new HttpError(409, "The incident changed while the postmortem was being generated.");
+    current.postmortem = markdown;
     // Incidents live in memory; keep the write-up and its source timeline on disk.
-    const dir = join(ROOT, "data", "postmortems");
+    const dir = join(DATA, "postmortems");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${incident.id}.md`), incident.postmortem);
-    writeFileSync(join(dir, `${incident.id}.timeline.json`), JSON.stringify(incident.view(), null, 2));
+    writeFileSync(join(dir, `${current.id}.md`), markdown);
+    writeJsonAtomic(join(dir, `${current.id}.timeline.json`), current.view());
     broadcastIncident();
     return json(200, { markdown: incident.postmortem });
   }
@@ -762,8 +936,9 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
 
 restoreSession();
 
-http.listen(PORT, () => {
-  console.log(`Control Tower server on :${PORT}  (agents: ${AGENT_MODEL}, router: ${ROUTER_MODEL} × ${ROUTER_VOTES} votes)`);
+http.listen(PORT, "127.0.0.1", () => {
+  const address = http.address();
+  console.log(`Control Tower server on 127.0.0.1:${typeof address === "object" ? address?.port : PORT}  (agents: ${AGENT_MODEL}, router: ${ROUTER_MODEL} × ${ROUTER_VOTES} votes)`);
   if (!process.env.ANTHROPIC_API_KEY) console.warn("⚠ ANTHROPIC_API_KEY is not set in .env");
   if (!process.env.RESON8_API_KEY) console.warn("⚠ RESON8_API_KEY is not set in .env (typed input still works)");
 });
@@ -771,8 +946,12 @@ http.listen(PORT, () => {
 // Save before exiting so a restart picks up exactly where we left off.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    saveNow();
+    session.abort();
+    for (const mission of missions) if (["planning", "allocating"].includes(mission.status)) mission.cancel();
+    try { saveNow(); }
+    catch (error) { console.error("Could not save the session during shutdown:", error); }
     for (const a of agents) a.close("shutdown");
+    telemetry.close();
     process.exit(0);
   });
 }

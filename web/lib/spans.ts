@@ -68,3 +68,23 @@ export const RUN_STATUS_STYLE: Record<RunStatus, { label: string; className: str
   stopped: { label: "stopped", className: "text-span-http border-span-http/40 bg-span-http/10" },
   interrupted: { label: "interrupted", className: "text-muted-foreground border-border" },
 };
+
+// Agents are called by what they do; the number is for voice ("two, stop").
+export function agentName(a: { id: string; role: string | null }): string {
+  return a.role || `Agent ${a.id}`;
+}
+
+// What an agent is doing right now, in a few words.
+export function currentAction(a: { status: AgentStatus; startsAt: number | null; events: AgentEvent[] }): string {
+  if (a.startsAt) return "about to start";
+  if (a.status === "blocked") return "waiting for your approval";
+  const last = a.events.at(-1);
+  if (!last) return a.status === "starting" ? "starting…" : "";
+  if (a.status === "idle") return "finished";
+  if (a.status === "paused") return "stopped";
+  if (last.kind === "tool") {
+    const { name, detail } = splitTool(last.text);
+    return `${name}${detail ? ` ${detail}` : ""}`;
+  }
+  return last.text.replace(/\s+/g, " ").slice(0, 120);
+}

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --import tsx --test tests/*.test.ts",
     "dev": "concurrently -k -n server,web -c blue,magenta \"tsx server/index.ts\" \"vite\"",
     "server": "tsx server/index.ts",
     "typecheck": "tsc --noEmit",

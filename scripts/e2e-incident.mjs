@@ -1,8 +1,8 @@
 // Drives an incident drill over the WebSocket: declare by voice, watch, and
 // approve the first rollback request. Prints a compact log.
-import WebSocket from "ws";
+import { towerSocket } from "./tower-socket.mjs";
 const seconds = Number(process.argv[2] ?? 120);
-const ws = new WebSocket("ws://localhost:8787/ws");
+const ws = await towerSocket();
 const t0 = Date.now();
 const ts = () => `+${((Date.now() - t0) / 1000).toFixed(0).padStart(3)}s`;
 let approved = new Set();

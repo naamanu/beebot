@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { writeJsonAtomic } from "./persistence.ts";
 
 // Standing rules the operator has spoken ("no new dependencies").
 // Persisted so they carry over to future sessions.
@@ -9,7 +9,8 @@ export class RuleBook {
   constructor(private file: string) {
     if (existsSync(file)) {
       try {
-        this.rules = JSON.parse(readFileSync(file, "utf8"));
+        const saved: unknown = JSON.parse(readFileSync(file, "utf8"));
+        this.rules = Array.isArray(saved) ? saved.filter((rule): rule is string => typeof rule === "string") : [];
       } catch {
         this.rules = [];
       }
@@ -36,7 +37,6 @@ export class RuleBook {
   }
 
   private save(): void {
-    mkdirSync(dirname(this.file), { recursive: true });
-    writeFileSync(this.file, JSON.stringify(this.rules, null, 2));
+    writeJsonAtomic(this.file, this.rules);
   }
 }
