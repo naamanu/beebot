@@ -8,7 +8,8 @@ import { Agent, type AgentSnapshot } from "./agents.ts";
 import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
-import type { ClientMsg, Decision, RouteVerdict, ServerMsg } from "./types.ts";
+import { Telemetry } from "./telemetry.ts";
+import type { ClientMsg, Decision, RouteVerdict, RunStatus, ServerMsg } from "./types.ts";
 import { DEFAULT_TASKS, addWorktree, createRun, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,6 +22,8 @@ const SESSION_FILE = join(ROOT, "data", "session.json");
 const TEMPLATE = join(ROOT, "demo", "template");
 
 const rules = new RuleBook(join(ROOT, "data", "rules.json"));
+const telemetry = new Telemetry(join(ROOT, "data", "telemetry.db"));
+telemetry.onChange(() => broadcast({ type: "telemetry" }));
 const router = new Router(ROUTER_MODEL, ROUTER_VOTES);
 const clients = new Set<WebSocket>();
 
@@ -70,9 +73,12 @@ function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapsho
     cwd,
     model: AGENT_MODEL,
     restore,
+    telemetry,
+    workspace: run?.dir ?? "",
     rules: () => rules.asPrompt(),
     onEvent: (agentId, event, status) => {
-      broadcast({ type: "agent_event", id: agentId, event, status });
+      const runId = agents.find((a) => a.id === agentId)?.runId ?? null;
+      broadcast({ type: "agent_event", id: agentId, event, status, runId });
       save();
     },
   });
@@ -90,6 +96,8 @@ function restoreSession(): void {
     // Agents that were mid-task when the server stopped carry on by themselves.
     const interrupted = agents.filter((a) => a.status === "working" || a.status === "starting");
     for (const a of interrupted) a.resumeAfterRestart();
+    // Runs that were in flight and aren't being resumed are marked interrupted.
+    telemetry.closeOrphans(new Set(agents.flatMap((a) => (a.runId ? [a.runId] : []))));
     console.log(`Restored ${agents.length} agent(s) from the last session (${interrupted.length} resumed).`);
   } catch (err) {
     console.warn(`Could not restore the last session: ${(err as Error).message}`);
@@ -97,7 +105,7 @@ function restoreSession(): void {
 }
 
 function resetSession(): void {
-  for (const a of agents) a.close();
+  for (const a of agents) a.close("reset");
   agents = [];
   run = null;
   recent = [];
@@ -143,6 +151,7 @@ async function routeAndApply(utterance: string, focused: string | null): Promise
     focused,
   });
   recent.push(utterance);
+  telemetry.recordDecision(verdict);
 
   if (verdict.action === "clarify") {
     const question = clarifyingQuestion(verdict, agents.map((a) => a.view()));
@@ -168,20 +177,25 @@ function remember(d: Decision): void {
 async function apply(v: RouteVerdict): Promise<void> {
   if (v.intent === "rule") {
     rules.add(v.instruction);
-    for (const a of agents) a.addRule(v.instruction);
+    for (const a of agents) {
+      a.traceRouter(v);
+      a.addRule(v.instruction);
+    }
     broadcast(state());
     return;
   }
   if (v.intent === "assign" && (v.target === "new" || agents.length === 0)) {
-    spawnAgent(v.instruction);
+    spawnAgent(v.instruction).traceRouter(v);
     return;
   }
   const targets = v.target === "all" ? agents : agents.filter((a) => a.id === v.target);
   for (const a of targets) {
+    if (v.intent !== "assign") a.traceRouter(v); // assign opens a fresh run; trace it there
     if (v.intent === "assign") {
       // One task for everyone makes no sense; "all" + assign is treated as a correction.
       if (v.target === "all") a.correct(v.instruction);
       else a.assign(v.instruction);
+      a.traceRouter(v);
       continue;
     }
     if (v.intent === "stop") await a.stop(v.instruction || "Stopped by operator");
@@ -198,7 +212,33 @@ function phrases(): string[] {
   return [...numbers.map((n) => `agent ${n}`), "all agents", "new agent", "new task", "stop", "ship it", "from now on"];
 }
 
-const http = createServer((_req, res) => {
+const RUN_STATUSES = new Set<RunStatus>(["running", "success", "error", "stopped", "interrupted"]);
+
+// Read-only JSON API for the Runs page.
+const http = createServer((req, res) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const json = (status: number, body: unknown) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  if (url.pathname === "/api/summary") return json(200, telemetry.summary());
+  if (url.pathname === "/api/runs") {
+    const status = url.searchParams.get("status") as RunStatus | null;
+    return json(
+      200,
+      telemetry.listRuns({
+        status: status && RUN_STATUSES.has(status) ? status : undefined,
+        agent: url.searchParams.get("agent") || undefined,
+        q: url.searchParams.get("q") || undefined,
+        limit: Math.min(Number(url.searchParams.get("limit")) || 200, 1000),
+      }),
+    );
+  }
+  const m = url.pathname.match(/^\/api\/runs\/([\w-]+)$/);
+  if (m) {
+    const detail = telemetry.getRun(m[1]!);
+    return detail ? json(200, detail) : json(404, { error: "run not found" });
+  }
   res.writeHead(200, { "content-type": "text/plain" });
   res.end("Control Tower server. Open the web UI at http://localhost:5173\n");
 });
@@ -292,7 +332,7 @@ http.listen(PORT, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     saveNow();
-    for (const a of agents) a.close();
+    for (const a of agents) a.close("shutdown");
     process.exit(0);
   });
 }

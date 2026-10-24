@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { estimateCost } from "./pricing.ts";
 import type { AgentView, Intent, RouteVerdict } from "./types.ts";
 
 // The decision engine. Every spoken turn is classified by N independent
@@ -51,6 +52,19 @@ export class Router {
         }),
       ),
     );
+    const usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    for (const r of results) {
+      if (r.status !== "fulfilled") continue;
+      const u = r.value.usage;
+      usage.inputTokens += u.input_tokens;
+      usage.outputTokens += u.output_tokens;
+      usage.costUsd += estimateCost(this.model, {
+        inputTokens: u.input_tokens,
+        outputTokens: u.output_tokens,
+        cacheReadTokens: u.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+      });
+    }
     const ballots = results.flatMap((r) => (r.status === "fulfilled" && r.value.parsed_output ? [r.value.parsed_output] : []));
     if (ballots.length === 0) {
       const reason = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
@@ -84,6 +98,7 @@ export class Router {
       votes: ranked.map(({ target, intent, count }) => ({ target, intent, count })),
       action,
       ms: Date.now() - started,
+      usage,
     };
   }
 }

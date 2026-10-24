@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentStatus, Intent } from "../../server/types.ts";
+import type { AgentEvent, AgentStatus, Intent, RunStatus, SpanKind } from "../../server/types.ts";
 
 // Each kind of event gets its own color, like spans in a trace waterfall.
 export const EVENT_STYLE: Record<AgentEvent["kind"], { label: string; dot: string; bar: string }> = {
@@ -46,3 +46,21 @@ export function formatDuration(ms: number): string {
   if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+// Trace span colors. This order passed the palette validator (lightness,
+// chroma, colorblind separation, contrast) on the light surface.
+export const SPAN_KIND_STYLE: Record<SpanKind, { label: string; bar: string; dot: string }> = {
+  invoke_agent: { label: "Agent", bar: "bg-span-agent", dot: "bg-span-agent" },
+  chat: { label: "Model call", bar: "bg-span-chat", dot: "bg-span-chat" },
+  execute_tool: { label: "Tool", bar: "bg-span-tool", dot: "bg-span-tool" },
+  router: { label: "Router", bar: "bg-span-workflow", dot: "bg-span-workflow" },
+  operator: { label: "Operator", bar: "bg-span-http", dot: "bg-span-http" },
+};
+
+export const RUN_STATUS_STYLE: Record<RunStatus, { label: string; className: string }> = {
+  running: { label: "running", className: "text-span-retrieval border-span-retrieval/40 bg-span-retrieval/10" },
+  success: { label: "success", className: "text-span-tool border-span-tool/40 bg-span-tool/10" },
+  error: { label: "error", className: "text-span-error border-span-error/40 bg-span-error/10" },
+  stopped: { label: "stopped", className: "text-span-http border-span-http/40 bg-span-http/10" },
+  interrupted: { label: "interrupted", className: "text-muted-foreground border-border" },
+};

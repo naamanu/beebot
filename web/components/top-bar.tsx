@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Dot, Pill } from "@/components/pill";
+import { navigate, useRoute } from "@/hooks/use-route";
 import { useTower } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -26,6 +27,7 @@ export function TopBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: ()
   const level = useTower((s) => s.levels.at(-1) ?? 0);
   const cost = agents.reduce((sum, a) => sum + a.costUsd, 0);
   const working = agents.filter((a) => a.status === "working").length;
+  const route = useRoute();
 
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-border px-5">
@@ -35,6 +37,27 @@ export function TopBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: ()
         </div>
         <h1 className="text-xl tracking-tight">Control Tower</h1>
       </div>
+
+      <nav className="flex items-center gap-1 rounded-lg bg-secondary p-0.5" aria-label="Views">
+        {(
+          [
+            ["/", "Tower", route.page === "tower"],
+            ["/runs", "Runs", route.page !== "tower"],
+          ] as const
+        ).map(([path, label, active]) => (
+          <button
+            key={path}
+            onClick={() => navigate(path)}
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "rounded-md px-3 py-1 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
+              active && "bg-card text-foreground shadow-sm ring-1 ring-foreground/10",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
 
       <div className="hidden items-center gap-2 md:flex">
         <Pill className={cn(connected ? "border-span-tool/40 text-span-tool" : "border-span-error/40 text-span-error")}>

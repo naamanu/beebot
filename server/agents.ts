@@ -1,6 +1,8 @@
 import { relative } from "node:path";
 import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, AgentStatus, AgentView } from "./types.ts";
+import type { Telemetry } from "./telemetry.ts";
+import { RunTracer } from "./tracer.ts";
+import type { AgentEvent, AgentStatus, AgentView, RouteVerdict } from "./types.ts";
 
 // An async iterable we can keep pushing user messages into. The Agent SDK's
 // streaming input mode reads from it for the whole session, which is what lets
@@ -50,6 +52,8 @@ export interface AgentOptions {
   model: string;
   rules: () => string;
   onEvent: (id: string, event: AgentEvent, status: AgentStatus) => void;
+  telemetry: Telemetry;
+  workspace: string;
   restore?: AgentSnapshot;
 }
 
@@ -62,6 +66,7 @@ export interface AgentSnapshot {
   events: AgentEvent[];
   costUsd: number;
   sessionId: string | null;
+  runId?: string | null;
 }
 
 export class Agent {
@@ -72,6 +77,7 @@ export class Agent {
   private sessionId: string | null = null;
   private inbox = new Inbox();
   private q: Query | null = null;
+  private tracer: RunTracer;
 
   constructor(private opts: AgentOptions) {
     this.task_ = opts.task;
@@ -81,6 +87,16 @@ export class Agent {
       this.costUsd = opts.restore.costUsd;
       this.sessionId = opts.restore.sessionId;
     }
+    const live = opts.restore && (opts.restore.status === "working" || opts.restore.status === "starting");
+    this.tracer = new RunTracer(
+      opts.telemetry,
+      opts.id,
+      opts.model,
+      opts.workspace,
+      () => this.sessionId,
+      live ? (opts.restore?.runId ?? null) : null,
+      this.costUsd,
+    );
   }
 
   get id(): string {
@@ -91,8 +107,12 @@ export class Agent {
     return this.task_;
   }
 
+  get runId(): string | null {
+    return this.tracer.runId;
+  }
+
   view(): AgentView {
-    return { id: this.id, task: this.task, status: this.status, events: this.events.slice(-200), costUsd: this.costUsd };
+    return { id: this.id, task: this.task, status: this.status, events: this.events.slice(-200), costUsd: this.costUsd, runId: this.tracer.runId };
   }
 
   snapshot(): AgentSnapshot {
@@ -104,11 +124,13 @@ export class Agent {
       events: this.events.slice(-200),
       costUsd: this.costUsd,
       sessionId: this.sessionId,
+      runId: this.tracer.runId,
     };
   }
 
   // Kick off the agent on its task.
   begin(): void {
+    this.tracer.begin(this.task);
     this.inbox.push(this.task);
     this.ensureStarted();
   }
@@ -116,6 +138,7 @@ export class Agent {
   // After a server restart: pick the session back up where it stopped.
   resumeAfterRestart(): void {
     this.log("steer", "↻ Server restarted, resuming", "working");
+    this.tracer.operator("Server restarted: resuming");
     this.inbox.push("[Operator] The control server restarted while you were working. Continue where you left off.");
     this.ensureStarted();
   }
@@ -150,6 +173,8 @@ export class Agent {
   // correction resumes it.
   async stop(reason: string): Promise<void> {
     this.log("steer", `⏹ ${reason}`, "paused");
+    this.tracer.operator(`Stop: ${reason}`);
+    this.tracer.markStopping();
     await this.q?.interrupt().catch(() => undefined);
   }
 
@@ -157,12 +182,14 @@ export class Agent {
   // running turn instead of waiting for the agent to finish.
   correct(instruction: string): void {
     this.log("steer", `↪ ${instruction}`, "working");
+    this.tracer.operator(`Correct: ${instruction}`);
     this.inbox.push(`[Operator] ${instruction}`, "now");
     this.ensureStarted();
   }
 
   approve(instruction: string): void {
     this.log("steer", `✓ ${instruction}`, "working");
+    this.tracer.operator(`Approve: ${instruction}`);
     this.inbox.push(
       `[Operator] Approved: ${instruction}. Wrap up now: make sure tests pass, then commit your work with a clear message.`,
       "next",
@@ -175,6 +202,7 @@ export class Agent {
     const busy = this.status === "working";
     this.task_ = task;
     this.log("steer", `＋ New task: ${task}`, "working");
+    this.tracer.begin(task);
     this.inbox.push(
       `[Operator] New task${busy ? " (drop what you were doing)" : ""}: ${task}`,
       busy ? "now" : "next",
@@ -184,11 +212,20 @@ export class Agent {
 
   addRule(rule: string): void {
     this.log("steer", `§ New rule: ${rule}`, this.status);
+    if (this.tracer.runId) this.tracer.operator(`Rule: ${rule}`);
     // A session that hasn't started picks the rule up from its system prompt.
     if (this.q) this.inbox.push(`[Operator] New standing rule for all agents: ${rule}. Check your current work against it.`, "next");
   }
 
-  close(): void {
+  // The router vote behind an instruction, shown in the run's trace.
+  traceRouter(v: RouteVerdict): void {
+    this.tracer.router(v);
+  }
+
+  // reset: the user stopped everything. shutdown: the server is restarting
+  // and the run will be resumed, so leave it open.
+  close(reason: "reset" | "shutdown" = "shutdown"): void {
+    if (reason === "reset") this.tracer.abandon("stopped");
     this.inbox.close();
     this.q?.close();
   }
@@ -205,6 +242,7 @@ export class Agent {
     switch (msg.type) {
       case "assistant":
         if (msg.parent_tool_use_id) return; // skip subagent chatter
+        this.tracer.onAssistant(msg);
         for (const block of msg.message.content) {
           if (block.type === "text" && block.text.trim()) {
             this.flushText();
@@ -212,11 +250,17 @@ export class Agent {
           }
           if (block.type === "tool_use") {
             this.flushText();
-            this.log("tool", describeTool(block.name, block.input, this.opts.cwd), "working");
+            const description = describeTool(block.name, block.input, this.opts.cwd);
+            this.tracer.onToolUse(block.id, block.name, description, block.input);
+            this.log("tool", description, "working");
           }
         }
         break;
+      case "user":
+        if (!msg.parent_tool_use_id) this.tracer.onUser(msg);
+        break;
       case "result":
+        this.tracer.onResult(msg);
         this.costUsd = msg.total_cost_usd;
         // The turn's last message is usually the result itself: show it once, as the result.
         if (msg.subtype === "success" && this.pendingText?.trim() === (msg.result ?? "").trim()) this.pendingText = null;
@@ -225,7 +269,10 @@ export class Agent {
         else if (this.status !== "paused") this.log("error", `Stopped: ${msg.subtype}`, "idle");
         break;
       case "system":
-        if (msg.subtype === "init") this.sessionId = msg.session_id;
+        if (msg.subtype === "init") {
+          this.sessionId = msg.session_id;
+          this.tracer.onSession(msg.session_id);
+        }
         if (msg.subtype === "session_state_changed" && msg.state === "running" && this.status !== "paused") {
           this.setStatus("working");
         }

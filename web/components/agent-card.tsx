@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Maximize2 } from "lucide-react";
+import { Maximize2, Waypoints } from "lucide-react";
 import type { AgentEvent, AgentView } from "../../server/types.ts";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Dot, Pill } from "@/components/pill";
 import { useNow } from "@/hooks/use-now";
+import { navigate } from "@/hooks/use-route";
 import { EVENT_STYLE, STATUS_STYLE, formatDuration, splitTool } from "@/lib/spans";
 import { useTower } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -51,6 +52,11 @@ export function AgentCard({ agent }: { agent: AgentView }) {
             <Pill>{formatDuration(elapsed)}</Pill>
             <Pill className="hidden @[24rem]:inline-flex">${agent.costUsd.toFixed(4)}</Pill>
             <Pill className="hidden @[36rem]:inline-flex">{tools} tools</Pill>
+            {agent.runId && (
+              <Button variant="ghost" size="icon-sm" onClick={() => navigate(`/runs/${agent.runId}`)} aria-label={`Trace of agent ${agent.id}'s current run`} title="View trace">
+                <Waypoints />
+              </Button>
+            )}
             <Button variant="ghost" size="icon-sm" onClick={() => setFocus(agent.id)} aria-label={`Open agent ${agent.id}`}>
               <Maximize2 />
             </Button>

@@ -19,6 +19,14 @@ mic → Reson8 (turns STT) → router: N parallel Haiku votes → act / ask / ig
 - **Focus view:** open any agent to see its full history and message it directly. Voice commands that don't name an agent go to the open one, and the others keep working in the side strip. Press Esc to go back to the grid.
 - **Survives restarts:** the session is saved to `data/session.json`. On restart, every agent is restored and any agent that was mid-task resumes its Claude session.
 
+## Observability
+
+The **Runs** tab traces every run: one piece of work by one agent, from the instruction that started it to its result. Traces are stored in `data/telemetry.db` (SQLite) and kept across sessions.
+
+- **Overview:** totals for runs, success rate, spend (agents and router), tokens, p50/p95 duration, tool calls and router decisions; spend per run; and a table of all runs you can filter by status, agent or text.
+- **Run detail:** a waterfall of spans, using OpenTelemetry GenAI names: `invoke_agent` (the run), `chat` (each model call), `execute_tool` (each tool call, with input, output and errors), plus the `router` vote and `operator` instruction behind each steer. When a correction makes the SDK start a new turn, the new run is linked back to the one it continues.
+- **Numbers:** run tokens and cost come from the Agent SDK's own per-turn accounting. Router cost is estimated from token usage (`server/pricing.ts`).
+
 ## Run
 
 ```bash

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AgentCard } from "@/components/agent-card";
@@ -10,6 +11,10 @@ import { HeardPanel } from "@/components/heard-panel";
 import { RulesPanel } from "@/components/rules-panel";
 import { TopBar } from "@/components/top-bar";
 import { useMic } from "@/hooks/use-mic";
+import { useRoute } from "@/hooks/use-route";
+import { queryClient } from "@/lib/api";
+import { RunDetail } from "@/components/runs/run-detail";
+import { RunsPage } from "@/components/runs/runs-page";
 import { connectTower, useTower } from "@/lib/store";
 import type { AgentView } from "../server/types.ts";
 
@@ -42,16 +47,23 @@ export function App() {
   const agents = useTower((s) => s.agents);
   const focused = useTower((s) => s.focused);
   const mic = useMic();
+  const route = useRoute();
 
   useEffect(() => connectTower(), []);
 
   const open = agents.find((a) => a.id === focused);
 
   return (
+    <QueryClientProvider client={queryClient}>
     <TooltipProvider delayDuration={200}>
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
         <TopBar micOn={mic.on} onToggleMic={mic.toggle} />
-        {/* Below lg the page scrolls; from lg up everything fits the viewport. */}
+        {route.page !== "tower" ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 lg:overflow-hidden">
+            {route.page === "run" ? <RunDetail key={route.id} id={route.id} /> : <RunsPage />}
+          </div>
+        ) : (
+        /* Below lg the page scrolls; from lg up everything fits the viewport. */
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 lg:flex-row lg:overflow-hidden">
           <main className="flex min-h-0 min-w-0 flex-1 gap-3">
             {open ? (
@@ -73,8 +85,10 @@ export function App() {
             <RulesPanel />
           </aside>
         </div>
+        )}
       </div>
       <Toaster position="bottom-left" />
     </TooltipProvider>
+    </QueryClientProvider>
   );
 }

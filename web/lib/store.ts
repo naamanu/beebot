@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { toast } from "sonner";
+import { invalidateTelemetry } from "./api.ts";
 import type { AgentView, ClientMsg, RouteVerdict, ServerMsg } from "../../server/types.ts";
 
 export interface FeedItem {
@@ -69,7 +70,7 @@ function handle(m: ServerMsg): void {
     case "agent_event":
       set((s) => ({
         agents: s.agents.map((a) =>
-          a.id === m.id ? { ...a, status: m.status, events: [...a.events, m.event].slice(-200) } : a,
+          a.id === m.id ? { ...a, status: m.status, runId: m.runId, events: [...a.events, m.event].slice(-200) } : a,
         ),
         steeredAt: m.event.kind === "steer" ? { ...s.steeredAt, [m.id]: Date.now() } : s.steeredAt,
       }));
@@ -94,6 +95,9 @@ function handle(m: ServerMsg): void {
     case "speak":
       set((s) => ({ feed: s.feed[0] ? [{ ...s.feed[0], question: m.text }, ...s.feed.slice(1)] : s.feed }));
       speak(m.text);
+      break;
+    case "telemetry":
+      invalidateTelemetry();
       break;
     case "notice":
       if (m.level === "error") toast.error(m.text);
