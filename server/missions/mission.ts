@@ -38,6 +38,7 @@ export class Mission {
   error: string | null = null;
   endedAt: number | null = null;
   quick = false;
+  followUp = false; // started from a review call's action items
   title: string;
   private operation: AbortController | null = null;
 
@@ -78,6 +79,7 @@ export class Mission {
       id: this.id,
       title: this.title,
       quick: this.quick,
+      followUp: this.followUp,
       request: this.ctx.request,
       template: this.ctx.template,
       files: this.ctx.files.map((f) => f.name),

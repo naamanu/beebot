@@ -36,6 +36,7 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
       result: null,
       branch: null,
       costUsd: members.reduce((s, a) => s + a.costUsd, 0),
+      followUp: false,
     });
   }
 
@@ -64,6 +65,7 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
       result: status === "ready" || status === "done" || status === "failed" ? lastResult(resultAgent) : null,
       branch: m.template === "coding" && resultAgent && /ready|done|failed/.test(status) ? `agent-${resultAgent.id}` : null,
       costUsd: m.costUsd + members.reduce((s, a) => s + a.costUsd, 0),
+      followUp: m.followUp ?? false,
     });
   }
 

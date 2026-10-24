@@ -299,7 +299,7 @@ function readHead(path: string): string | null {
   return lines.length > 20 ? `[first 20 of ${lines.length} lines]\n${head}` : head;
 }
 
-function createMission(request: string, template: "general" | "coding", files: AttachedFile[], { quick = false } = {}): Mission {
+function createMission(request: string, template: "general" | "coding", files: AttachedFile[], { quick = false, followUp = false } = {}): Mission {
   const signal = session.signal;
   const mission = new Mission(
     {
@@ -331,6 +331,7 @@ function createMission(request: string, template: "general" | "coding", files: A
     },
   );
   missions = [mission, ...missions];
+  mission.followUp = followUp;
   if (quick) mission.startQuick();
   else void mission.start();
   save();
@@ -448,7 +449,7 @@ function acceptProposal(id: string | null): void {
     return;
   }
   // Code-shaped items get a coding agent; the rest a general one.
-  for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true });
+  for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true, followUp: true });
   broadcast(state());
   broadcast({ type: "speak", text: `Started ${p.items.length} follow-up task${p.items.length === 1 ? "" : "s"}.` });
   save();

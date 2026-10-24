@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildTasks } from "../server/tasks.ts";
 import { plainIncidentStatus } from "../web/lib/incident-status.ts";
-import type { AgentView, IncidentView } from "../server/types.ts";
+import type { AgentView, IncidentView, MissionView } from "../server/types.ts";
 
 const incident = (extra: Partial<IncidentView> = {}): IncidentView => ({
   id: "inc", title: "Checkout", severity: "SEV1", status: "investigating", declaredAt: 0, impactAt: 0, mitigatedAt: null, errorRate: [],
@@ -21,4 +22,11 @@ test("plain status follows what is happening, not a hand-set field", () => {
   const calm = [8, 0.6, 0.5, 0.4, 0.5].map((v, t) => ({ t, v }));
   assert.equal(plainIncidentStatus(incident({ fixAppliedAt: 10, errorRate: calm }), []).label, "Back to normal");
   assert.equal(plainIncidentStatus(incident({ errorRate: calm }), []).label, "Investigating", "calm without a fix is not recovery");
+});
+
+test("follow-ups from a review call stay marked as follow-ups", () => {
+  const base: MissionView = { id: "m", title: "Lower the pool alert", quick: true, request: "Add a pool alert", template: "general", files: [], status: "running", plan: null, revisions: [], allocation: null, workers: [], leadAgentId: null, costUsd: 0, createdAt: 1, endedAt: null, error: null };
+  const [followUp, own] = buildTasks([], [{ ...base, followUp: true }, { ...base, id: "n", createdAt: 0 }], null);
+  assert.equal(followUp!.followUp, true);
+  assert.equal(own!.followUp, false, "missions saved before the flag existed are not follow-ups");
 });

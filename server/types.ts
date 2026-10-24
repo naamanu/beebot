@@ -266,6 +266,7 @@ export interface MissionView {
   id: string;
   title: string; // short, for lists
   quick: boolean; // started without a plan: one agent, right away
+  followUp?: boolean; // started from a review call's action items
   request: string;
   template: "general" | "coding";
   files: string[];
@@ -309,6 +310,7 @@ export interface TaskView {
   result: string | null;
   branch: string | null; // coding: the branch with the finished work
   costUsd: number;
+  followUp: boolean; // started from a review call's action items
 }
 
 // --- Proactive: the watchtower and what it proposes ---

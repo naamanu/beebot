@@ -2,6 +2,8 @@ import { useState } from "react";
 import { ArrowRight, CheckCircle2, Eye, EyeOff, Siren, Zap } from "lucide-react";
 import type { WatchView } from "../../../server/types.ts";
 import { Button } from "@/components/ui/button";
+import { TaskStatusIcon, TaskStatusLabel } from "@/components/tasks/task-status";
+import { useTasks } from "@/hooks/use-tasks";
 import { formatDuration } from "@/lib/spans";
 import { useTower } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -14,6 +16,8 @@ export function HealthHome() {
   const send = useTower((s) => s.send);
   const connected = useTower((s) => s.connected);
   const setShowIncident = useTower((s) => s.setShowIncident);
+  const setFocus = useTower((s) => s.setFocus);
+  const followUps = useTasks().filter((t) => t.followUp);
   const bad = watch?.state === "anomaly";
   const off = watch && !watch.enabled;
 
@@ -70,6 +74,29 @@ export function HealthHome() {
             </span>
             <ArrowRight className="size-4 text-muted-foreground" />
           </button>
+        </section>
+      )}
+
+      {followUps.length > 0 && (
+        <section className="w-full max-w-3xl">
+          <h2 className="mb-2 text-[12px] font-medium tracking-wide text-muted-foreground uppercase">Follow-ups from the review</h2>
+          <ul className="flex flex-col divide-y divide-border rounded-xl ring-1 ring-foreground/10">
+            {followUps.map((t) => (
+              <li key={t.id}>
+                <button
+                  onClick={() => setFocus(t.resultAgentId ?? t.agentIds[0] ?? null)}
+                  disabled={!t.agentIds.length}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-accent"
+                >
+                  <TaskStatusIcon status={t.status} className="size-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate text-[14px]">{t.title}</span>
+                  <span className="text-[12.5px] text-muted-foreground">
+                    <TaskStatusLabel status={t.status} />
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
     </div>

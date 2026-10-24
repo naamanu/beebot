@@ -69,6 +69,12 @@ function TowerView({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: () => 
   const showing = showIncident && incident && incidentTask;
   useApprovalKeys();
 
+  // Follow-ups starting means the incident is behind us: show them at home.
+  const followUps = tasks.filter((t) => t.followUp).length;
+  useEffect(() => {
+    if (followUps && incident?.status === "resolved") setShowIncident(false);
+  }, [followUps]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // A new open incident (usually one the tower declared itself) takes over.
   useEffect(() => {
     if (incident && incident.status !== "resolved") setShowIncident(true);
