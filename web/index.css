@@ -1,0 +1,166 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource/cal-sans";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: 'Cal Sans', 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+    --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
+    --color-span-agent: var(--span-agent);
+    --color-span-chat: var(--span-chat);
+    --color-span-tool: var(--span-tool);
+    --color-span-retrieval: var(--span-retrieval);
+    --color-span-http: var(--span-http);
+    --color-span-workflow: var(--span-workflow);
+    --color-span-embed: var(--span-embed);
+    --color-span-error: var(--span-error);
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    /* Light zinc theme, inspired by telemetry.dev's dashboard */
+    --radius: 0.625rem;
+    --background: oklch(0.985 0 0);
+    --foreground: oklch(0.21 0.006 285.9);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.21 0.006 285.9);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.21 0.006 285.9);
+    --primary: oklch(0.21 0.006 285.9);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0 0 0 / 4%);
+    --secondary-foreground: oklch(0.274 0.006 286);
+    --muted: oklch(0 0 0 / 4%);
+    --muted-foreground: oklch(0.52 0.014 286);
+    --accent: oklch(0 0 0 / 3%);
+    --accent-foreground: oklch(0.21 0.006 285.9);
+    --destructive: oklch(0.58 0.2 27);
+    --border: oklch(0 0 0 / 8%);
+    --input: oklch(0 0 0 / 10%);
+    --ring: oklch(0.55 0.014 286 / 50%);
+    /* Span colors: one per kind of event, deep enough to read on white */
+    --span-agent: oklch(0.63 0.19 30);
+    --span-chat: oklch(0.58 0.17 298);
+    --span-tool: oklch(0.6 0.16 140);
+    --span-retrieval: oklch(0.6 0.12 215);
+    --span-http: oklch(0.64 0.17 52);
+    --span-workflow: oklch(0.56 0.18 258);
+    --span-embed: oklch(0.6 0.17 345);
+    --span-error: oklch(0.58 0.21 25);
+    --chart-1: var(--span-chat);
+    --chart-2: var(--span-tool);
+    --chart-3: var(--span-retrieval);
+    --chart-4: var(--span-http);
+    --chart-5: var(--span-workflow);
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.21 0.006 285.9);
+    --sidebar-primary: oklch(0.21 0.006 285.9);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0 0 0 / 3%);
+    --sidebar-accent-foreground: oklch(0.21 0.006 285.9);
+    --sidebar-border: oklch(0 0 0 / 8%);
+    --sidebar-ring: oklch(0.55 0.014 286 / 50%);
+}
+
+.dark {
+    /* Zinc base, inspired by telemetry.dev's dark theme */
+    --background: oklch(0.141 0.005 285.8);
+    --foreground: oklch(0.967 0.001 286.4);
+    --card: oklch(0.17 0.005 285.8);
+    --card-foreground: oklch(0.967 0.001 286.4);
+    --popover: oklch(0.19 0.006 285.8);
+    --popover-foreground: oklch(0.967 0.001 286.4);
+    --primary: oklch(0.967 0.001 286.4);
+    --primary-foreground: oklch(0.21 0.006 285.9);
+    --secondary: oklch(1 0 0 / 6%);
+    --secondary-foreground: oklch(0.92 0.004 286.3);
+    --muted: oklch(1 0 0 / 5%);
+    --muted-foreground: oklch(0.65 0.015 286);
+    --accent: oklch(1 0 0 / 4%);
+    --accent-foreground: oklch(0.967 0.001 286.4);
+    --destructive: oklch(0.68 0.17 28);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 12%);
+    --ring: oklch(0.705 0.015 286 / 60%);
+    /* Span colors: one per kind of event, like trace waterfalls */
+    --span-agent: oklch(0.68 0.17 28);
+    --span-chat: oklch(0.72 0.14 298);
+    --span-tool: oklch(0.76 0.15 135);
+    --span-retrieval: oklch(0.76 0.12 205);
+    --span-http: oklch(0.73 0.16 55);
+    --span-workflow: oklch(0.64 0.17 255);
+    --span-embed: oklch(0.72 0.15 345);
+    --span-error: oklch(0.65 0.21 22);
+    --chart-1: var(--span-chat);
+    --chart-2: var(--span-tool);
+    --chart-3: var(--span-retrieval);
+    --chart-4: var(--span-http);
+    --chart-5: var(--span-workflow);
+    --sidebar: oklch(0.141 0.005 285.8);
+    --sidebar-foreground: oklch(0.967 0.001 286.4);
+    --sidebar-primary: oklch(0.967 0.001 286.4);
+    --sidebar-primary-foreground: oklch(0.21 0.006 285.9);
+    --sidebar-accent: oklch(1 0 0 / 4%);
+    --sidebar-accent-foreground: oklch(0.967 0.001 286.4);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.705 0.015 286 / 60%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans antialiased;
+    font-feature-settings: "cv01" 1, "cv02" 1, "cv03" 1, "cv04" 1, "cv09" 1, "ss07" 1, "ss08" 1;
+    font-variant-numeric: slashed-zero;
+    }
+  h1, h2, h3 {
+    @apply font-heading;
+    }
+}
