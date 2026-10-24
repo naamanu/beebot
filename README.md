@@ -1,10 +1,29 @@
 # Control Tower
 
-**An incident commander you talk to.** Control Tower watches production, notices when it breaks, declares the incident itself and puts four Claude investigators on it. Then it keeps you briefed out loud. You steer it hands-free and approve risky actions by voice. When it's over, it writes the postmortem.
+Control Tower is a voice-controlled AI incident commander that helps engineering teams investigate service outages, approve recovery actions and turn incident reviews into follow-up work.
 
-Most agent tools wait for a prompt. During an outage, you're the bottleneck: the tower acts first and lets you approve.
+During an outage, engineers must inspect logs, compare deployments, check metrics, communicate progress and document decisions—all while trying to restore service. Control Tower coordinates these activities through specialized AI agents and gives the engineer one place to direct their work. It can initiate an investigation when it detects a problem, provide spoken updates and request human approval before taking consequential actions.
 
-**Prototype scope:** production metrics, logs, deploys, rollbacks, restarts and status-page posts run against a deterministic Shopfront simulator. Claude investigation and recommendation calls are real when configured; voice input uses Reson8. Jamie uses its real API when a key is configured and clearly documented sample incident notes otherwise. There is no live production connector yet.
+The workflow covers detection through review:
+
+1. **Detect and initiate.** A monitoring component checks checkout error rates. When errors remain above a threshold across consecutive checks, Control Tower opens an incident and launches four investigators automatically.
+2. **Investigate in parallel.** The Logs agent examines error signatures, Changes investigates recent deployments and configuration changes, Metrics measures impact and tests competing explanations, and Comms prepares customer-facing status updates. Agents use structured tools and a shared findings log so their discoveries can inform one another.
+3. **Direct the response by voice or text.** Engineers can ask questions such as “Logs, what are you seeing?”, redirect an investigation or stop an agent. Reson8 transcribes spoken instructions. A routing layer interprets the request using the incident, selected task and agent context. Multiple model votes determine whether the instruction has enough agreement to execute; ambiguous requests trigger clarification.
+4. **Approve consequential actions.** Rollbacks, service restarts and customer-facing status posts require human approval. The interface shows the requested action, and the engineer can approve or deny it by voice or through a button.
+5. **Verify recovery and close the incident.** A live chart shows how the service responds to actions. Investigators finish independently, while the engineer reviews the combined findings and decides when to resolve the incident.
+6. **Document and follow through.** Control Tower generates a postmortem from the incident timeline, agent results, approvals and status updates. Jamie meeting notes can add context from the review call, and its action items become proposed follow-up tasks that the engineer can authorize agents to start.
+
+Jamie connects the investigation to the team’s existing knowledge. Agents can search previous incident-call notes for relevant history, while review-call summaries and action items feed the postmortem and subsequent work. Without a configured Jamie connection, the prototype uses clearly defined sample incident history.
+
+The interface combines service health, investigator activity, shared findings, approval requests and incident progress. An Activity view exposes the underlying execution traces, including tool calls, errors, token usage and costs, so users can inspect how the agents reached their conclusions.
+
+Underneath the incident workflow, Control Tower also supports planned general and coding tasks. A planner divides work into dependent workstreams, starts agents when their prerequisites succeed and can assign a lead to combine their results. Coding agents work in separate Git worktrees. Tasks progress to Ready for review after the required agents finish, and the user explicitly marks them done.
+
+The application uses TypeScript, a Node.js backend, React and Vite, WebSockets, the Claude Agent SDK, structured MCP tools, Reson8 speech recognition and Jamie’s API and webhook integration. Spoken responses use the browser’s speech synthesis. Session data and SQLite telemetry preserve task results and execution history.
+
+The current prototype demonstrates incident response against a simulated production service, including a faulty deployment and misleading diagnostic signals. Agent execution, tool calls, routing and approval handling are implemented, while production metrics and remediation effects are simulated. It does not yet connect to a real production environment, and active incidents currently remain in memory.
+
+Control Tower’s central idea is to give engineers a coordinated response team they can direct conversationally, with shared evidence, visible progress and human control over consequential decisions.
 
 ## 2-minute submission demo
 
