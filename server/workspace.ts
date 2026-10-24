@@ -34,3 +34,10 @@ export function addWorktree(run: Run, agentId: string): string {
   git(run.repo, "worktree", "add", "-q", "-b", `agent-${agentId}`, dir);
   return dir;
 }
+
+// A plain working directory, for agents that don't need a code checkout.
+export function addScratchDir(run: Run, agentId: string): string {
+  const dir = join(run.dir, `agent-${agentId}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}

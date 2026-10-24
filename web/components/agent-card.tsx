@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Maximize2, Waypoints } from "lucide-react";
 import type { AgentEvent, AgentView } from "../../server/types.ts";
 import { Button } from "@/components/ui/button";
+import { ApprovalCard } from "@/components/incident/approval-card";
 import { Card } from "@/components/ui/card";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Dot, Pill } from "@/components/pill";
@@ -43,7 +44,9 @@ export function AgentCard({ agent }: { agent: AgentView }) {
       <div className="@container flex flex-col gap-2.5 border-b border-border px-4 py-3">
         <div className="flex items-center gap-2.5">
           <span className="grid size-7 place-items-center rounded-md bg-secondary font-heading text-sm">{agent.id}</span>
-          <h2 className="font-mono text-sm font-medium whitespace-nowrap">agent-{agent.id}</h2>
+          <h2 className="font-mono text-sm font-medium whitespace-nowrap">
+            {agent.role ? <span className="font-sans font-semibold">{agent.role}</span> : `agent-${agent.id}`}
+          </h2>
           <div className="ml-auto flex items-center gap-1.5">
             <Pill className={status.className}>
               <Dot className={status.dot} />
@@ -63,6 +66,7 @@ export function AgentCard({ agent }: { agent: AgentView }) {
           </div>
         </div>
         <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">{agent.task}</p>
+        {agent.approval && <ApprovalCard approval={agent.approval} compact />}
       </div>
       <SpanList events={agent.events} />
     </Card>
@@ -108,7 +112,7 @@ function SpanList({ events }: { events: AgentEvent[] }) {
 function SpanRow({ event, offset, relMs }: { event: AgentEvent; offset: number; relMs: number }) {
   const style = EVENT_STYLE[event.kind];
   const { name, detail } = event.kind === "tool" ? splitTool(event.text) : { name: style.label, detail: event.text };
-  const emphasized = event.kind === "steer" || event.kind === "result" || event.kind === "error";
+  const emphasized = event.kind === "steer" || event.kind === "approval" || event.kind === "result" || event.kind === "error";
 
   return (
     <HoverCard openDelay={350} closeDelay={50}>
@@ -116,7 +120,7 @@ function SpanRow({ event, offset, relMs }: { event: AgentEvent; offset: number; 
         <div
           className={cn(
             "group grid cursor-default grid-cols-[minmax(0,1fr)_88px_52px] items-center gap-3 px-4 py-[5px] hover:bg-accent",
-            event.kind === "steer" && "bg-span-http/8",
+            (event.kind === "steer" || event.kind === "approval") && "bg-span-http/8",
           )}
         >
           <div className="flex min-w-0 items-center gap-2">
@@ -149,5 +153,5 @@ function SpanRow({ event, offset, relMs }: { event: AgentEvent; offset: number; 
 }
 
 function kindText(kind: AgentEvent["kind"]): string {
-  return kind === "steer" ? "text-span-http" : kind === "result" ? "text-span-workflow" : "text-span-error";
+  return kind === "steer" || kind === "approval" ? "text-span-http" : kind === "result" ? "text-span-workflow" : "text-span-error";
 }

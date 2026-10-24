@@ -2,6 +2,8 @@ import { Play, RadioTower } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Dot } from "@/components/pill";
+import { DeclareIncidentDialog } from "@/components/incident/declare-dialog";
+import { Siren } from "lucide-react";
 import { INTENT_STYLE } from "@/lib/spans";
 import { useTower } from "@/lib/store";
 import type { Intent } from "../../server/types.ts";
@@ -10,7 +12,7 @@ const EXAMPLES: { say: string; intent: Intent }[] = [
   { say: "New agent: add due dates to todos.", intent: "assign" },
   { say: "Spin someone up to fix search.", intent: "assign" },
   { say: "From now on, no new dependencies.", intent: "rule" },
-  { say: "Two, stop. Wrong file.", intent: "stop" },
+  { say: "Declare an incident: checkout is failing.", intent: "incident" },
 ];
 
 export function EmptyState() {
@@ -38,10 +40,19 @@ export function EmptyState() {
             </li>
           ))}
         </ul>
-        <Button size="lg" variant="outline" onClick={() => send({ type: "start", tasks: [] })} disabled={!connected}>
-          <Play data-icon="inline-start" />
-          Or start 4 demo tasks
-        </Button>
+        <div className="flex flex-wrap justify-center gap-2">
+          <DeclareIncidentDialog
+            trigger={
+              <Button size="lg" disabled={!connected}>
+                <Siren data-icon="inline-start" /> Run an incident drill
+              </Button>
+            }
+          />
+          <Button size="lg" variant="outline" onClick={() => send({ type: "start", tasks: [] })} disabled={!connected}>
+            <Play data-icon="inline-start" />
+            Start 4 coding tasks
+          </Button>
+        </div>
       </EmptyContent>
     </Empty>
   );

@@ -5,12 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { Agent, type AgentSnapshot } from "./agents.ts";
+import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
+import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
+import { writePostmortem } from "./incident/postmortem.ts";
 import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { ClientMsg, Decision, RouteVerdict, RunStatus, ServerMsg } from "./types.ts";
-import { DEFAULT_TASKS, addWorktree, createRun, type Run } from "./workspace.ts";
+import type { Approval, ClientMsg, Decision, IncidentStatus, RouteVerdict, RunStatus, ServerMsg } from "./types.ts";
+import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 8787);
@@ -25,6 +28,7 @@ const rules = new RuleBook(join(ROOT, "data", "rules.json"));
 const telemetry = new Telemetry(join(ROOT, "data", "telemetry.db"));
 telemetry.onChange(() => broadcast({ type: "telemetry" }));
 const router = new Router(ROUTER_MODEL, ROUTER_VOTES);
+const jamie = new Jamie(process.env.JAMIE_API_KEY);
 const clients = new Set<WebSocket>();
 
 let run: Run | null = null;
@@ -33,6 +37,10 @@ let recent: string[] = [];
 let decisions: Decision[] = []; // newest first, so a reloaded page can rebuild its feed
 let pendingClarification: { utterance: string; question: string } | null = null;
 let routing = Promise.resolve(); // utterances are routed one at a time, in order
+// The active incident lives in memory: the simulated outage isn't persisted.
+let incident: Incident | null = null;
+let callNotes: JamieMeeting | null = null; // the war-room call, from Jamie
+let incidentTimer: ReturnType<typeof setInterval> | undefined;
 
 function broadcast(msg: ServerMsg): void {
   const data = JSON.stringify(msg);
@@ -40,7 +48,7 @@ function broadcast(msg: ServerMsg): void {
 }
 
 function state(): ServerMsg {
-  return { type: "state", agents: agents.map((a) => a.view()), rules: rules.list(), decisions };
+  return { type: "state", agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null };
 }
 
 // --- Session persistence: the server can restart without losing agents. ---
@@ -66,8 +74,10 @@ function saveNow(): void {
   writeFileSync(SESSION_FILE, JSON.stringify(data));
 }
 
-function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapshot): Agent {
+function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapshot, role?: string): Agent {
   return new Agent({
+    incident: incident && role ? { incident, role } : undefined,
+    onApproval: (agent, approval) => onApproval(agent, approval),
     id,
     task,
     cwd,
@@ -92,7 +102,10 @@ function restoreSession(): void {
     run = saved.run;
     decisions = saved.decisions ?? [];
     recent = saved.recent ?? [];
-    agents = saved.agents.filter((a) => existsSync(a.cwd)).map((a) => makeAgent(a.id, a.task, a.cwd, a));
+    // Incident agents can't come back: their simulated production is gone.
+    agents = saved.agents
+      .filter((a) => existsSync(a.cwd) && a.template !== "incident")
+      .map((a) => makeAgent(a.id, a.task, a.cwd, a));
     // Agents that were mid-task when the server stopped carry on by themselves.
     const interrupted = agents.filter((a) => a.status === "working" || a.status === "starting");
     for (const a of interrupted) a.resumeAfterRestart();
@@ -107,6 +120,7 @@ function restoreSession(): void {
 function resetSession(): void {
   for (const a of agents) a.close("reset");
   agents = [];
+  endIncident();
   run = null;
   recent = [];
   decisions = [];
@@ -135,6 +149,71 @@ function spawnAgent(task: string, { quiet = false } = {}): Agent {
   return agent;
 }
 
+// --- Incidents ---
+
+function declareIncident(title: string): void {
+  resetSession();
+  incident = new Incident(title, "SEV1", jamie, () => broadcastIncident());
+  callNotes = null;
+  run = createRun(ROOT, TEMPLATE);
+  for (const role of INCIDENT_ROLES) {
+    const id = String(agents.length + 1);
+    const agent = makeAgent(id, `${role.task} Incident: ${title}.`, addScratchDir(run, id), undefined, role.name);
+    agents.push(agent);
+    agent.begin();
+  }
+  // Metrics move continuously; push them to the UI while the incident is open.
+  incidentTimer = setInterval(broadcastIncident, 2000);
+  broadcast(state());
+  broadcast({ type: "speak", text: `Incident declared: ${title}. Four investigators are on it.` });
+  save();
+}
+
+function setIncidentStatus(status: IncidentStatus, by: string): void {
+  if (!incident) return;
+  incident.setStatus(status, by);
+  if (status === "resolved") clearInterval(incidentTimer);
+  broadcastIncident();
+}
+
+function endIncident(): void {
+  clearInterval(incidentTimer);
+  incident = null;
+  callNotes = null;
+}
+
+let incidentBroadcastPending = false;
+function broadcastIncident(): void {
+  if (incidentBroadcastPending) return;
+  incidentBroadcastPending = true;
+  setImmediate(() => {
+    incidentBroadcastPending = false;
+    broadcast({ type: "incident", incident: incident?.view() ?? null });
+  });
+}
+
+// A risky action is waiting (approval set) or was decided (approval null).
+function onApproval(agent: Agent, approval: Approval | null): void {
+  if (approval) {
+    incident?.log("approval", `Requested: ${approval.summary}`, agentLabel(agent));
+    // Keep the spoken prompt short: the full text is on screen.
+    const spoken = approval.tool === "post_status_update" ? "post a status page update" : approval.summary.toLowerCase();
+    const who = agent.view().role ? `${agent.view().role}, agent ${agent.id},` : `Agent ${agent.id}`;
+    broadcast({ type: "speak", text: `${who} wants to ${spoken}. Approve?` });
+  }
+  broadcast(state());
+}
+
+function decideApproval(agent: Agent, decision: "approve" | "deny", by: string, note?: string): void {
+  const approval = agent.decide(decision, by, note);
+  if (approval) incident?.log("approval", `${decision === "approve" ? "Approved" : "Denied"}: ${approval.summary}`, by);
+}
+
+function agentLabel(a: Agent): string {
+  const role = a.view().role;
+  return role ? `${role} (agent ${a.id})` : `agent ${a.id}`;
+}
+
 function hear(utterance: string, focused: string | null): void {
   routing = routing.then(() => routeAndApply(utterance, focused)).catch((err) => {
     broadcast({ type: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
@@ -149,6 +228,7 @@ async function routeAndApply(utterance: string, focused: string | null): Promise
     recent: recent.slice(-4),
     pendingClarification,
     focused,
+    incident: incident?.view() ?? null,
   });
   recent.push(utterance);
   telemetry.recordDecision(verdict);
@@ -175,6 +255,22 @@ function remember(d: Decision): void {
 }
 
 async function apply(v: RouteVerdict): Promise<void> {
+  if (v.intent === "incident") {
+    if (v.incidentAction === "declare") declareIncident(v.instruction || "Production incident");
+    else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
+    return;
+  }
+  incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
+  // Yes or no to an agent that is waiting for approval.
+  const waiting = agents.filter((a) => a.approval && (v.target === a.id || v.target === "all"));
+  if ((v.intent === "approve" || v.intent === "stop") && waiting.length) {
+    for (const a of waiting) {
+      a.traceRouter(v);
+      decideApproval(a, v.intent === "approve" ? "approve" : "deny", "commander (voice)", v.intent === "stop" ? v.instruction : undefined);
+    }
+    broadcast(state());
+    return;
+  }
   if (v.intent === "rule") {
     rules.add(v.instruction);
     for (const a of agents) {
@@ -209,7 +305,20 @@ async function apply(v: RouteVerdict): Promise<void> {
 // Words worth biasing the speech model toward.
 function phrases(): string[] {
   const numbers = ["one", "two", "three", "four", "five", "six", "seven", "eight"].slice(0, Math.max(agents.length, 4));
-  return [...numbers.map((n) => `agent ${n}`), "all agents", "new agent", "new task", "stop", "ship it", "from now on"];
+  return [
+    ...numbers.map((n) => `agent ${n}`),
+    "all agents",
+    "new agent",
+    "new task",
+    "stop",
+    "ship it",
+    "from now on",
+    "declare an incident",
+    "roll back",
+    "approve",
+    "mitigated",
+    "resolved",
+  ];
 }
 
 const RUN_STATUSES = new Set<RunStatus>(["running", "success", "error", "stopped", "interrupted"]);
@@ -221,6 +330,11 @@ const http = createServer((req, res) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   };
+  const fail = (err: unknown) => json(500, { error: err instanceof Error ? err.message : String(err) });
+  if (url.pathname.startsWith("/api/incident") || url.pathname.startsWith("/api/jamie") || url.pathname.startsWith("/webhooks/")) {
+    void incidentApi(req, url, json).catch(fail);
+    return;
+  }
   if (url.pathname === "/api/summary") return json(200, telemetry.summary());
   if (url.pathname === "/api/runs") {
     const status = url.searchParams.get("status") as RunStatus | null;
@@ -307,6 +421,17 @@ wss.on("connection", (ws) => {
       case "reset":
         resetSession();
         break;
+      case "approval": {
+        const agent = agents.find((a) => a.approval?.id === msg.id);
+        if (agent) decideApproval(agent, msg.decision, "commander");
+        break;
+      }
+      case "declare_incident":
+        declareIncident(msg.title.trim() || "Production incident");
+        break;
+      case "incident_status":
+        setIncidentStatus(msg.status, "commander");
+        break;
       case "clear_rules":
         rules.clear();
         broadcast(state());
@@ -319,6 +444,55 @@ wss.on("connection", (ws) => {
     mic?.close();
   });
 });
+
+async function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+// Incident endpoints: postmortem, Jamie call notes, and Jamie's webhook.
+async function incidentApi(req: import("node:http").IncomingMessage, url: URL, json: (status: number, body: unknown) => void): Promise<void> {
+  if (url.pathname === "/api/jamie/meetings" && req.method === "GET") {
+    if (!jamie.configured) return json(200, { configured: false, meetings: [] });
+    return json(200, { configured: true, meetings: await jamie.list(10) });
+  }
+  // Jamie calls this when a meeting is processed (needs a public HTTPS URL, e.g. a tunnel).
+  if (url.pathname === "/webhooks/jamie" && req.method === "POST") {
+    const secret = process.env.JAMIE_WEBHOOK_KEY;
+    if (!secret || req.headers["x-jamie-api-key"] !== secret) return json(401, { error: "bad webhook key" });
+    const body = JSON.parse(await readBody(req)) as { data: Omit<JamieMeeting, "id" | "transcript"> & { transcript: { speakerName: string; text: string }[] } };
+    if (incident) {
+      callNotes = { ...body.data, id: "webhook", transcript: body.data.transcript.map((t) => `**${t.speakerName}** ${t.text}`).join("\n") };
+      incident.jamieMeetingId = callNotes.id;
+      incident.log("action", `Call notes received from Jamie: ${body.data.title}`, "Jamie");
+    }
+    return json(200, { ok: true });
+  }
+  if (!incident) return json(404, { error: "no active incident" });
+  if (url.pathname === "/api/incident/jamie" && req.method === "POST") {
+    const { meetingId } = JSON.parse(await readBody(req)) as { meetingId: string };
+    callNotes = await jamie.get(meetingId);
+    incident.jamieMeetingId = meetingId;
+    incident.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
+    return json(200, { title: callNotes.title });
+  }
+  if (url.pathname === "/api/incident/postmortem" && req.method === "GET") {
+    return json(200, { markdown: incident.postmortem });
+  }
+  if (url.pathname === "/api/incident/postmortem" && req.method === "POST") {
+    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= incident!.declaredAt - 5000);
+    incident.postmortem = await writePostmortem(incident, runs, callNotes);
+    // Incidents live in memory; keep the write-up and its source timeline on disk.
+    const dir = join(ROOT, "data", "postmortems");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${incident.id}.md`), incident.postmortem);
+    writeFileSync(join(dir, `${incident.id}.timeline.json`), JSON.stringify(incident.view(), null, 2));
+    broadcastIncident();
+    return json(200, { markdown: incident.postmortem });
+  }
+  json(404, { error: "not found" });
+}
 
 restoreSession();
 

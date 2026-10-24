@@ -19,6 +19,26 @@ mic → Reson8 (turns STT) → router: N parallel Haiku votes → act / ask / ig
 - **Focus view:** open any agent to see its full history and message it directly. Voice commands that don't name an agent go to the open one, and the others keep working in the side strip. Press Esc to go back to the grid.
 - **Survives restarts:** the session is saved to `data/session.json`. On restart, every agent is restored and any agent that was mid-task resumes its Claude session.
 
+## Incident response
+
+Say "declare an incident: checkout is failing" (or click **Declare incident**). Four investigators start on a simulated Shopfront outage:
+
+- **Logs** finds the error signature and where the failures start.
+- **Changes** matches recent deploys and config changes against when the impact began.
+- **Metrics** measures the blast radius and rules red herrings in or out.
+- **Comms** keeps the public status page up to date.
+
+They reach production only through tools (`server/incident/`): logs, metrics, deploys and diffs, plus a shared findings log so they build on each other's work. They also have a search over past incident calls recorded with [Jamie](https://www.meetjamie.ai).
+
+- **Spoken approvals:** a rollback, a restart or a status-page post pauses the agent. The tower asks out loud ("Changes, agent 2, wants to roll back deploy #482. Approve?"). Say "approve" or "no", or use the buttons.
+- **Live status:** the incident bar shows severity, impact time and the checkout error rate, with production actions marked on it. Say "we're mitigated" or "resolve the incident" to change the status.
+- **Postmortem:** generated from the incident timeline, every agent run, the approvals, the status posts and, if attached, the war-room call notes from Jamie. Saved to `data/postmortems/`.
+- **The simulated outage:** deploy #482 cut the payments DB pool from 50 to 5. The red herrings are a CDN cache dip and an old search warning. Rolling back #482 fixes it; restarting only helps for a moment. Run `npx tsx scripts/sim-check.ts` to see it without agents, or `node scripts/e2e-incident.mjs` to run a whole drill over the WebSocket.
+
+**Jamie:** set `JAMIE_API_KEY` (a personal key from Jamie, Settings → Developers) to search real past calls and attach the war-room call to the postmortem. Without it, the search uses two sample past incidents. Jamie's `meeting.completed` webhook can post to `/webhooks/jamie` (set `JAMIE_WEBHOOK_KEY`; it needs a public HTTPS URL, e.g. through a tunnel).
+
+Incidents live in memory: a server restart ends the drill (the postmortem is kept on disk).
+
 ## Observability
 
 The **Runs** tab traces every run: one piece of work by one agent, from the instruction that started it to its result. Traces are stored in `data/telemetry.db` (SQLite) and kept across sessions.

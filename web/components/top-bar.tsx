@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Dot, Pill } from "@/components/pill";
+import { DeclareIncidentDialog } from "@/components/incident/declare-dialog";
 import { navigate, useRoute } from "@/hooks/use-route";
 import { useTower } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ export function TopBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: ()
   const cost = agents.reduce((sum, a) => sum + a.costUsd, 0);
   const working = agents.filter((a) => a.status === "working").length;
   const route = useRoute();
+  const incident = useTower((s) => s.incident);
 
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-border px-5">
@@ -41,8 +43,8 @@ export function TopBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: ()
       <nav className="flex items-center gap-1 rounded-lg bg-secondary p-0.5" aria-label="Views">
         {(
           [
-            ["/", "Tower", route.page === "tower"],
-            ["/runs", "Runs", route.page !== "tower"],
+            ["/", "Tower", route.page === "tower" || route.page === "postmortem"],
+            ["/runs", "Runs", route.page === "runs" || route.page === "run"],
           ] as const
         ).map(([path, label, active]) => (
           <button
@@ -78,6 +80,7 @@ export function TopBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: ()
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        {!incident && <DeclareIncidentDialog />}
         {agents.length === 0 ? (
           <Button variant="outline" onClick={() => send({ type: "start", tasks: [] })} disabled={!connected}>
             <Play data-icon="inline-start" /> Demo tasks

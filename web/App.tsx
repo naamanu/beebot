@@ -15,6 +15,9 @@ import { useRoute } from "@/hooks/use-route";
 import { queryClient } from "@/lib/api";
 import { RunDetail } from "@/components/runs/run-detail";
 import { RunsPage } from "@/components/runs/runs-page";
+import { ApprovalsPanel, FindingsPanel } from "@/components/incident/findings-panel";
+import { IncidentBar } from "@/components/incident/incident-bar";
+import { PostmortemPage } from "@/components/incident/postmortem-page";
 import { connectTower, useTower } from "@/lib/store";
 import type { AgentView } from "../server/types.ts";
 
@@ -46,6 +49,7 @@ function AgentGrid({ agents }: { agents: AgentView[] }) {
 export function App() {
   const agents = useTower((s) => s.agents);
   const focused = useTower((s) => s.focused);
+  const incident = useTower((s) => s.incident);
   const mic = useMic();
   const route = useRoute();
 
@@ -60,11 +64,13 @@ export function App() {
         <TopBar micOn={mic.on} onToggleMic={mic.toggle} />
         {route.page !== "tower" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 lg:overflow-hidden">
-            {route.page === "run" ? <RunDetail key={route.id} id={route.id} /> : <RunsPage />}
+            {route.page === "run" ? <RunDetail key={route.id} id={route.id} /> : route.page === "postmortem" ? <PostmortemPage /> : <RunsPage />}
           </div>
         ) : (
         /* Below lg the page scrolls; from lg up everything fits the viewport. */
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 lg:flex-row lg:overflow-hidden">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+          {incident && <IncidentBar incident={incident} />}
           <main className="flex min-h-0 min-w-0 flex-1 gap-3">
             {open ? (
               <>
@@ -79,10 +85,12 @@ export function App() {
               <AgentGrid agents={agents} />
             )}
           </main>
+          </div>
           <aside className="flex min-h-[560px] shrink-0 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:min-h-0 lg:w-[360px]">
+            <ApprovalsPanel />
             <HeardPanel micOn={mic.on} />
             <DecisionFeed />
-            <RulesPanel />
+            {incident ? <FindingsPanel incident={incident} /> : <RulesPanel />}
           </aside>
         </div>
         )}

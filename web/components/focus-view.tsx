@@ -7,6 +7,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { Dot, Pill } from "@/components/pill";
 import { Markdown } from "@/components/markdown";
+import { ApprovalCard } from "@/components/incident/approval-card";
 import { useNow } from "@/hooks/use-now";
 import { EVENT_STYLE, STATUS_STYLE, formatDuration, splitTool } from "@/lib/spans";
 import { useTower } from "@/lib/store";
@@ -42,7 +43,10 @@ export function FocusView({ agent }: { agent: AgentView }) {
       <header className="flex flex-col gap-3 border-b border-border px-5 py-4">
         <div className="flex items-center gap-3">
           <span className="grid size-8 place-items-center rounded-md bg-secondary font-heading">{agent.id}</span>
-          <h2 className="font-mono text-base font-medium">agent-{agent.id}</h2>
+          <h2 className="font-mono text-base font-medium">
+            agent-{agent.id}
+            {agent.role && <span className="ml-2 font-sans font-semibold">{agent.role}</span>}
+          </h2>
           <Pill className={status.className}>
             <Dot className={status.dot} />
             {status.label}
@@ -68,6 +72,7 @@ export function FocusView({ agent }: { agent: AgentView }) {
           </div>
         </div>
         <p className="text-sm leading-snug text-muted-foreground">{agent.task}</p>
+        {agent.approval && <ApprovalCard approval={agent.approval} />}
       </header>
 
       <Timeline events={agent.events} />
@@ -153,6 +158,7 @@ function kindText(kind: AgentEvent["kind"]): string {
     steer: "text-span-http",
     result: "text-span-workflow",
     error: "text-span-error",
+    approval: "text-span-http",
   }[kind];
 }
 

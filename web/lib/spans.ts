@@ -7,6 +7,7 @@ export const EVENT_STYLE: Record<AgentEvent["kind"], { label: string; dot: strin
   steer: { label: "operator", dot: "bg-span-http", bar: "bg-span-http" },
   result: { label: "result", dot: "bg-span-workflow", bar: "bg-span-workflow/80" },
   error: { label: "error", dot: "bg-span-error", bar: "bg-span-error/80" },
+  approval: { label: "approval", dot: "bg-span-http", bar: "bg-span-http" },
 };
 
 export const STATUS_STYLE: Record<AgentStatus, { label: string; className: string; dot: string }> = {
@@ -15,6 +16,7 @@ export const STATUS_STYLE: Record<AgentStatus, { label: string; className: strin
   idle: { label: "done", className: "text-span-tool border-span-tool/40 bg-span-tool/10", dot: "bg-span-tool" },
   paused: { label: "paused", className: "text-span-http border-span-http/40 bg-span-http/10", dot: "bg-span-http" },
   error: { label: "error", className: "text-span-error border-span-error/40 bg-span-error/10", dot: "bg-span-error" },
+  blocked: { label: "needs approval", className: "text-span-http border-span-http/50 bg-span-http/15", dot: "bg-span-http animate-pulse" },
 };
 
 export const INTENT_STYLE: Record<Intent, { bar: string; text: string; dot: string }> = {
@@ -23,6 +25,7 @@ export const INTENT_STYLE: Record<Intent, { bar: string; text: string; dot: stri
   correct: { bar: "bg-span-workflow", text: "text-span-workflow", dot: "bg-span-workflow" },
   approve: { bar: "bg-span-tool", text: "text-span-tool", dot: "bg-span-tool" },
   rule: { bar: "bg-span-chat", text: "text-span-chat", dot: "bg-span-chat" },
+  incident: { bar: "bg-span-agent", text: "text-span-agent", dot: "bg-span-agent" },
   chatter: { bar: "bg-muted-foreground/50", text: "text-muted-foreground", dot: "bg-muted-foreground" },
 };
 

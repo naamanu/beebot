@@ -1,8 +1,10 @@
 import { relative } from "node:path";
-import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { randomUUID } from "node:crypto";
+import { MCP_NAME, RISKY_TOOLS, SAFE_TOOLS, incidentPrompt, type Incident } from "./incident/incident.ts";
 import type { Telemetry } from "./telemetry.ts";
 import { RunTracer } from "./tracer.ts";
-import type { AgentEvent, AgentStatus, AgentView, RouteVerdict } from "./types.ts";
+import type { AgentEvent, AgentStatus, AgentView, Approval, RouteVerdict } from "./types.ts";
 
 // An async iterable we can keep pushing user messages into. The Agent SDK's
 // streaming input mode reads from it for the whole session, which is what lets
@@ -55,6 +57,9 @@ export interface AgentOptions {
   telemetry: Telemetry;
   workspace: string;
   restore?: AgentSnapshot;
+  // Incident agents use the shopfront tools instead of a code checkout.
+  incident?: { incident: Incident; role: string };
+  onApproval?: (agent: Agent, approval: Approval | null) => void;
 }
 
 // Everything needed to bring an agent back after a server restart.
@@ -67,6 +72,7 @@ export interface AgentSnapshot {
   costUsd: number;
   sessionId: string | null;
   runId?: string | null;
+  template?: "coding" | "incident";
 }
 
 export class Agent {
@@ -78,6 +84,7 @@ export class Agent {
   private inbox = new Inbox();
   private q: Query | null = null;
   private tracer: RunTracer;
+  private pending: { approval: Approval; resolve: (r: PermissionResult) => void } | null = null;
 
   constructor(private opts: AgentOptions) {
     this.task_ = opts.task;
@@ -112,7 +119,17 @@ export class Agent {
   }
 
   view(): AgentView {
-    return { id: this.id, task: this.task, status: this.status, events: this.events.slice(-200), costUsd: this.costUsd, runId: this.tracer.runId };
+    return {
+      id: this.id,
+      task: this.task,
+      status: this.status,
+      events: this.events.slice(-200),
+      costUsd: this.costUsd,
+      runId: this.tracer.runId,
+      template: this.opts.incident ? "incident" : "coding",
+      role: this.opts.incident?.role ?? null,
+      approval: this.pending?.approval ?? null,
+    };
   }
 
   snapshot(): AgentSnapshot {
@@ -125,6 +142,7 @@ export class Agent {
       costUsd: this.costUsd,
       sessionId: this.sessionId,
       runId: this.tracer.runId,
+      template: this.opts.incident ? "incident" : "coding",
     };
   }
 
@@ -147,26 +165,77 @@ export class Agent {
   // previous Claude session, so it keeps the whole conversation.
   private ensureStarted(): void {
     if (this.q) return;
-    this.q = query({
-      prompt: this.inbox,
-      options: {
-        cwd: this.opts.cwd,
-        model: this.opts.model,
-        resume: this.sessionId ?? undefined,
-        permissionMode: "acceptEdits",
-        allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          append:
-            `You are agent ${this.id}, one of several coding agents supervised live by a human operator who speaks instructions. ` +
-            `Work only inside your current directory. Messages starting with [Operator] come from that human: follow them immediately, ` +
-            `even if it means abandoning your current approach. Keep progress notes to one short sentence.` +
-            this.opts.rules(),
-        },
-      },
-    });
+    this.q = query({ prompt: this.inbox, options: this.options() });
     void this.pump(this.q);
+  }
+
+  private options(): Options {
+    const common = { cwd: this.opts.cwd, model: this.opts.model, resume: this.sessionId ?? undefined };
+    const inc = this.opts.incident;
+    if (inc) {
+      return {
+        ...common,
+        tools: [], // no shell or files: production is reached through the shopfront tools
+        mcpServers: { [MCP_NAME]: inc.incident.mcpServer(this.id, inc.role) },
+        allowedTools: SAFE_TOOLS,
+        canUseTool: (toolName, input, { signal }) => this.checkTool(toolName, input, signal),
+        systemPrompt: incidentPrompt(inc.role) + this.opts.rules(),
+      };
+    }
+    return {
+      ...common,
+      permissionMode: "acceptEdits",
+      allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append:
+          `You are agent ${this.id}, one of several coding agents supervised live by a human operator who speaks instructions. ` +
+          `Work only inside your current directory. Messages starting with [Operator] come from that human: follow them immediately, ` +
+          `even if it means abandoning your current approach. Keep progress notes to one short sentence.` +
+          this.opts.rules(),
+      },
+    };
+  }
+
+  // Risky tools wait here for a human decision; anything else unexpected is refused.
+  private checkTool(toolName: string, input: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult> {
+    if (!RISKY_TOOLS.has(toolName)) return Promise.resolve({ behavior: "deny", message: `${toolName} is not available in this incident.` });
+    const approval: Approval = {
+      id: randomUUID(),
+      agentId: this.id,
+      tool: toolName.replace(`mcp__${MCP_NAME}__`, ""),
+      summary: describeAction(toolName, input),
+      input,
+      at: Date.now(),
+    };
+    this.log("approval", `⏸ Needs approval: ${approval.summary}`, "blocked");
+    return new Promise((resolve) => {
+      this.pending = { approval, resolve };
+      this.opts.onApproval?.(this, approval);
+      signal.addEventListener("abort", () => this.decide("deny", "cancelled"), { once: true });
+    });
+  }
+
+  get approval(): Approval | null {
+    return this.pending?.approval ?? null;
+  }
+
+  decide(decision: "approve" | "deny", by: string, note?: string): Approval | null {
+    const p = this.pending;
+    if (!p) return null;
+    this.pending = null;
+    if (decision === "approve") {
+      this.log("approval", `✓ Approved by ${by}: ${p.approval.summary}`, "working");
+      this.tracer.operator(`Approved: ${p.approval.summary}`, { by });
+      p.resolve({ behavior: "allow", updatedInput: p.approval.input });
+    } else {
+      this.log("approval", `✕ Denied by ${by}: ${p.approval.summary}${note ? ` (${note})` : ""}`, "working");
+      this.tracer.operator(`Denied: ${p.approval.summary}`, { by });
+      p.resolve({ behavior: "deny", message: `The incident commander denied this${note ? `: ${note}` : "."} Do not retry it unless asked.` });
+    }
+    this.opts.onApproval?.(this, null);
+    return p.approval;
   }
 
   // Stop: interrupt the running turn. The session stays alive so a later
@@ -225,6 +294,7 @@ export class Agent {
   // reset: the user stopped everything. shutdown: the server is restarting
   // and the run will be resumed, so leave it open.
   close(reason: "reset" | "shutdown" = "shutdown"): void {
+    if (this.pending) this.decide("deny", "system", "agent closed");
     if (reason === "reset") this.tracer.abandon("stopped");
     this.inbox.close();
     this.q?.close();
@@ -301,7 +371,22 @@ export class Agent {
   }
 }
 
+function describeAction(toolName: string, input: Record<string, unknown>): string {
+  const tool = toolName.replace(`mcp__${MCP_NAME}__`, "");
+  if (tool === "rollback_deploy") return `Roll back deploy #${String(input.deploy_id).replace("#", "")}`;
+  if (tool === "restart_service") return `Restart ${String(input.service)}`;
+  if (tool === "post_status_update") return `Post to status page [${String(input.status)}]: “${String(input.message)}”`;
+  return tool;
+}
+
 function describeTool(name: string, input: unknown, cwd: string): string {
+  // MCP tools arrive as mcp__shopfront__query_logs: show the short name.
+  if (name.startsWith("mcp__")) {
+    const short = name.split("__").pop()!;
+    const i = (input ?? {}) as Record<string, unknown>;
+    const args = Object.values(i).map((v) => String(v)).join(" ");
+    return `${short}${args ? ` · ${args.length > 90 ? args.slice(0, 90) + "…" : args}` : ""}`;
+  }
   const i = (input ?? {}) as Record<string, unknown>;
   // Show paths relative to the agent's worktree: "src/store.js", not the full path.
   const path = i.file_path ?? i.path;

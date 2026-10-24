@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import { invalidateTelemetry } from "./api.ts";
-import type { AgentView, ClientMsg, RouteVerdict, ServerMsg } from "../../server/types.ts";
+import type { AgentView, ClientMsg, IncidentView, RouteVerdict, ServerMsg } from "../../server/types.ts";
 
 export interface FeedItem {
   id: number;
@@ -15,6 +15,7 @@ interface TowerState {
   connected: boolean;
   agents: AgentView[];
   rules: string[];
+  incident: IncidentView | null;
   interim: string;
   feed: FeedItem[];
   levels: number[]; // recent mic levels, newest last
@@ -34,6 +35,7 @@ export const useTower = create<TowerState>()((set, get) => ({
   connected: false,
   agents: [],
   rules: [],
+  incident: null,
   interim: "",
   feed: [],
   levels: [],
@@ -59,6 +61,7 @@ function handle(m: ServerMsg): void {
     case "state":
       set((s) => ({
         agents: m.agents,
+        incident: m.incident,
         focused: s.focused && m.agents.some((a) => a.id === s.focused) ? s.focused : null,
         rules: m.rules,
         // On (re)connect the server's history is the source of truth for the feed.
@@ -95,6 +98,9 @@ function handle(m: ServerMsg): void {
     case "speak":
       set((s) => ({ feed: s.feed[0] ? [{ ...s.feed[0], question: m.text }, ...s.feed.slice(1)] : s.feed }));
       speak(m.text);
+      break;
+    case "incident":
+      set({ incident: m.incident });
       break;
     case "telemetry":
       invalidateTelemetry();

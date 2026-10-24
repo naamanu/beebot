@@ -130,7 +130,8 @@ export class RunTracer {
   onToolUse(id: string, name: string, description: string, input: unknown): void {
     const runId = this.ensureRun();
     const detail = description.includes(" · ") ? description.split(" · ").slice(1).join(" · ") : "";
-    const spanId = this.t.startSpan(runId, "execute_tool", name, detail, { input: clip(JSON.stringify(input, null, 2)) });
+    const short = name.startsWith("mcp__") ? name.split("__").pop()! : name;
+    const spanId = this.t.startSpan(runId, "execute_tool", short, detail, { input: clip(JSON.stringify(input, null, 2)), tool: name });
     this.tools.set(id, spanId);
   }
 
