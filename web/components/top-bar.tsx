@@ -39,7 +39,8 @@ export function TopBar() {
   const route = useRoute();
   const [confirmReset, setConfirmReset] = useState(false);
   const cost = tasks.reduce((sum, task) => sum + task.costUsd, 0);
-  const working = tasks.filter((task) => task.status === "working" || task.status === "planning").length;
+  // A task waiting on you is still active work.
+  const working = tasks.filter((task) => task.status === "working" || task.status === "planning" || task.status === "needs_you").length;
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3 sm:gap-4 sm:px-5">

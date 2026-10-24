@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import { invalidateTelemetry } from "./api.ts";
+import { shouldPlan, type PlanMode } from "./plan-mode.ts";
+export { shouldPlan, type PlanMode };
 import { buildTasks } from "../../server/tasks.ts";
 import { navigate } from "../hooks/use-route.ts";
 import type { AgentView, ClientMsg, IncidentView, MicStatus, MissionView, RouteVerdict, ServerMsg, Template, Upload } from "../../server/types.ts";
@@ -18,7 +20,7 @@ export interface Draft {
   text: string;
   template: Template;
   attachments: (Upload & { uploading?: boolean })[];
-  plan: boolean; // plan first, approve, then decide how many agents
+  plan: PlanMode; // auto: plan typed multi-part requests; voice starts right away
 }
 
 interface TowerState {
@@ -83,7 +85,7 @@ export const useTower = create<TowerState>()((set, get) => ({
   steeredAt: {},
   focused: null,
   focusedOutput: null,
-  draft: { text: "", template: "general", attachments: [], plan: true },
+  draft: { text: "", template: "general", attachments: [], plan: "auto" },
   setDraft: (patch) => {
     set({ draft: { ...get().draft, ...patch } });
     get().syncCommandContext();
@@ -112,7 +114,8 @@ export const useTower = create<TowerState>()((set, get) => ({
       context: {
         template: draft.template,
         attachments: draft.attachments.filter((file) => !file.uploading).map((file) => file.id),
-        plan: draft.plan && draft.template !== "incident",
+        // Voice turns use this context: in auto mode, spoken work starts right away.
+        plan: shouldPlan(draft.plan, "", true) && draft.template !== "incident",
         taskId: selectedTaskId,
         uploading: draft.attachments.some((file) => file.uploading),
       },

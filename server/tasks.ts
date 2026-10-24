@@ -9,9 +9,12 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
   if (incident) {
     const members = agents.filter((a) => a.template === "incident");
     const needs = approvals(members);
-    const ready = members.length > 0 && members.every(isAgentFinished);
+    // Ready once no investigator is still active (idle or stopped both count).
+    const active = members.some((a) => a.status === "working" || a.status === "starting" || a.status === "blocked" || !!a.startsAt);
+    const ready = members.length > 0 && !active;
+    const recovered = isRecovered(incident);
     const status: TaskStatus = incident.status === "resolved" ? "done" : needs.length ? "needs_you" : ready ? "ready" : "working";
-    if (status === "ready") needs.push({ type: "completion", label: "Review findings and mark done" });
+    if (status === "ready") needs.push({ type: "completion", label: recovered ? "Errors are back to normal: resolve it?" : "Review findings and mark done" });
     tasks.push({
       id: incident.id,
       kind: "incident",
@@ -63,6 +66,12 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
   // Needs you first, then working, then finished; newest first within each.
   const rank: Record<TaskStatus, number> = { needs_you: 0, ready: 0, planning: 1, working: 1, failed: 2, stopped: 2, done: 3 };
   return tasks.sort((x, y) => rank[x.status] - rank[y.status] || y.createdAt - x.createdAt);
+}
+
+// Checkout errors back near the 0.4% baseline for the last few samples.
+export function isRecovered(incident: IncidentView): boolean {
+  const recent = incident.errorRate.slice(-4);
+  return recent.length > 0 && recent.every((p) => p.v < 1);
 }
 
 function approvals(agents: AgentView[]): TaskNeed[] {

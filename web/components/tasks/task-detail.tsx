@@ -16,13 +16,21 @@ import { STATUS_STYLE, agentName, currentAction, formatDuration } from "@/lib/sp
 import { useTower } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { TaskStatusLabel } from "./task-status";
+import { LiveAgentCard } from "./live-agent-card";
 
-// One task as a story, top to bottom: what you asked, what needs you, the
-// plan, the agents, the result, and (collapsed) everything that happened.
+const isActive = (a: AgentView) => a.status === "working" || a.status === "starting" || a.status === "blocked" || !!a.startsAt;
+
+// While any of its agents is active, a task is shown as a live control tower;
+// once they've all stopped, as a story you can review.
 export function TaskDetail({ task }: { task: TaskView }) {
   const agents = useTower((s) => s.agents);
+  const members = task.agentIds.flatMap((id) => agents.filter((a) => a.id === id));
+  return members.some(isActive) ? <LiveTask task={task} members={members} /> : <TaskStory task={task} />;
+}
+
+function TaskHeader({ task }: { task: TaskView }) {
+  const agents = useTower((s) => s.agents);
   const missions = useTower((s) => s.missions);
-  const incident = useTower((s) => s.incident);
   const send = useTower((s) => s.send);
   const connected = useTower((s) => s.connected);
   const mission = task.missionId ? missions.find((m) => m.id === task.missionId) : undefined;
@@ -30,13 +38,8 @@ export function TaskDetail({ task }: { task: TaskView }) {
   const live = task.status === "working" || task.status === "planning" || task.status === "needs_you";
   const now = useNow(1000, live);
   const working = members.filter((a) => a.status === "working");
-  const failure = mission?.error || members.flatMap((agent) => agent.events)
-    .filter((event) => event.kind === "error")
-    .sort((a, b) => b.at - a.at)[0]?.text;
-
   return (
-    <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
-      <header className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-border px-4 py-4 sm:px-6">
+    <header className="flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-border px-4 py-4 sm:px-6">
         <div className="min-w-0 flex-1">
           <h1 className="break-words text-xl leading-tight">{task.title}</h1>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
@@ -63,7 +66,107 @@ export function TaskDetail({ task }: { task: TaskView }) {
             </Button>
           )}
         </div>
-      </header>
+    </header>
+  );
+}
+
+// The tower: every agent of the task streaming side by side, with what needs
+// you, the plan and findings in a rail beside them.
+function LiveTask({ task, members }: { task: TaskView; members: AgentView[] }) {
+  const missions = useTower((s) => s.missions);
+  const incident = useTower((s) => s.incident);
+  const mission = task.missionId ? missions.find((m) => m.id === task.missionId) : undefined;
+  const n = members.length;
+  const cols = n === 1 ? 1 : n <= 4 ? 2 : 3;
+  const waiting = members.filter((a) => a.approval);
+  const rail = waiting.length > 0 || task.needs.some((x) => x.type === "plan") || (mission && !mission.quick && mission.plan) || (task.kind === "incident" && incident);
+  return (
+    <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
+      <TaskHeader task={task} />
+      {task.kind === "incident" && incident && (
+        <div className="border-b border-border px-4 py-3 [&>section]:shadow-none [&>section]:ring-0 [&>section]:p-0">
+          <IncidentBar incident={incident} inline />
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 gap-3 bg-background/60 p-3">
+        <div
+          className="grid min-h-0 flex-1 gap-3"
+          style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${Math.ceil(n / cols)}, minmax(0, 1fr))` }}
+        >
+          {members.map((a) => (
+            <LiveAgentCard key={a.id} agent={a} />
+          ))}
+        </div>
+        {rail && (
+          <aside className="flex min-h-0 w-80 shrink-0 flex-col gap-4 overflow-y-auto rounded-xl bg-card p-4 ring-1 ring-foreground/10 [scrollbar-width:thin]">
+            {waiting.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <h3 className="text-[11px] font-medium tracking-wide text-span-http uppercase">Needs you</h3>
+                {waiting.map((a) => (
+                  <ApprovalCard key={a.approval!.id} approval={a.approval!} label={agentName(a)} />
+                ))}
+              </div>
+            )}
+            {mission?.status === "awaiting_approval" && <ApprovalBar missionId={mission.id} />}
+            {task.kind === "work" && (
+              <div>
+                <h3 className="mb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">You asked</h3>
+                <p className="line-clamp-4 text-[13px] leading-snug">{task.request}</p>
+              </div>
+            )}
+            {mission && !mission.quick && mission.plan && <CompactPlan mission={mission} members={members} />}
+            {task.kind === "incident" && incident && (
+              <div className="-mx-4 -mb-4 [&>section]:max-h-none [&>section]:border-t-0">
+                <FindingsPanel incident={incident} />
+              </div>
+            )}
+          </aside>
+        )}
+      </div>
+    </article>
+  );
+}
+
+// The plan as a checklist: each step, who has it, and whether that's done.
+function CompactPlan({ mission, members }: { mission: NonNullable<ReturnType<typeof useTower.getState>["missions"][number]>; members: AgentView[] }) {
+  const owner = (stepId: string) => mission.allocation?.workstreams.find((w) => w.stepIds.includes(stepId));
+  return (
+    <div>
+      <h3 className="mb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Plan · {mission.plan!.steps.length} steps</h3>
+      <ol className="flex flex-col gap-1">
+        {mission.plan!.steps.map((s) => {
+          const w = owner(s.id);
+          const worker = mission.workers.find((x) => x.name === w?.name);
+          const agent = members.find((a) => a.id === worker?.agentId);
+          const done = worker?.state === "done";
+          return (
+            <li key={s.id} className="flex items-start gap-2 text-[12.5px] leading-snug">
+              <span className={cn("mt-1 size-2 shrink-0 rounded-full", done ? "bg-span-tool" : worker?.state === "running" ? "animate-pulse bg-span-retrieval" : "bg-muted-foreground/30")} />
+              <span className={cn("min-w-0 flex-1", done && "text-muted-foreground line-through decoration-muted-foreground/40")}>{s.title}</span>
+              {agent && <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">#{agent.id}</span>}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+// One task as a story, top to bottom: what you asked, what needs you, the
+// plan, the agents, the result, and (collapsed) everything that happened.
+function TaskStory({ task }: { task: TaskView }) {
+  const agents = useTower((s) => s.agents);
+  const missions = useTower((s) => s.missions);
+  const incident = useTower((s) => s.incident);
+  const mission = task.missionId ? missions.find((m) => m.id === task.missionId) : undefined;
+  const members = task.agentIds.flatMap((id) => agents.filter((a) => a.id === id));
+  const failure = mission?.error || members.flatMap((agent) => agent.events)
+    .filter((event) => event.kind === "error")
+    .sort((a, b) => b.at - a.at)[0]?.text;
+
+  return (
+    <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
+      <TaskHeader task={task} />
 
       <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
         <div className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-5 sm:px-6">

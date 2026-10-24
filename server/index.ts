@@ -14,7 +14,7 @@ import { writePostmortem } from "./incident/postmortem.ts";
 import { Mission, fallbackTitle, type SpawnRequest } from "./missions/mission.ts";
 import { shortTitle } from "./missions/title.ts";
 import { recoverAgent, recoverMission } from "./missions/recovery.ts";
-import { buildTasks } from "./tasks.ts";
+import { buildTasks, isRecovered } from "./tasks.ts";
 import { OperatorInput } from "./operator.ts";
 import { writeJsonAtomic } from "./persistence.ts";
 import { clientMessageSchema, HttpError, parseJson, previewSchema } from "./protocol.ts";
@@ -35,7 +35,7 @@ const DATA = process.env.CONTROL_TOWER_DATA_DIR ?? join(ROOT, "data");
 const WORK = process.env.CONTROL_TOWER_WORK_DIR ?? ROOT;
 const SESSION_FILE = join(DATA, "session.json");
 const UPLOADS = join(DATA, "uploads");
-const UNDO_MS = 4000; // a new agent can be cancelled for this long before it starts
+const UNDO_MS = 2000; // a new agent can be cancelled for this long before it starts
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const TEMPLATE = join(ROOT, "demo", "template");
 
@@ -412,8 +412,21 @@ function broadcastIncident(): void {
   incidentBroadcastPending = true;
   setImmediate(() => {
     incidentBroadcastPending = false;
-    broadcast({ type: "incident", incident: incident?.view() ?? null });
+    const view = incident?.view() ?? null;
+    broadcast({ type: "incident", incident: view });
+    announceRecovery(view);
   });
+}
+
+// Once errors are back to normal after a fix, say so (once per incident) and
+// offer to close it. The commander still decides.
+let recoveryAnnouncedFor: string | null = null;
+function announceRecovery(view: ReturnType<Incident["view"]> | null): void {
+  if (!incident || !view || recoveryAnnouncedFor === view.id) return;
+  if (view.status === "resolved" || incident.sim.fixedAt === null || !isRecovered(view)) return;
+  recoveryAnnouncedFor = view.id;
+  incident.log("status", "Checkout errors are back to normal", "tower");
+  broadcast({ type: "speak", text: "Checkout errors are back to normal. Say “resolve the incident” when you're ready to close it." });
 }
 
 // A risky action is waiting (approval set) or was decided (approval null).

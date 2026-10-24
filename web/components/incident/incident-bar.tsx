@@ -11,7 +11,8 @@ import { ErrorRateChart } from "./error-rate-chart";
 
 const STATUSES: IncidentStatus[] = ["investigating", "identified", "mitigated", "resolved"];
 
-export function IncidentBar({ incident }: { incident: IncidentView }) {
+// inline: inside a task whose header already shows the title.
+export function IncidentBar({ incident, inline = false }: { incident: IncidentView; inline?: boolean }) {
   const send = useTower((s) => s.send);
   const open = incident.status !== "resolved";
   const now = useNow(1000, open);
@@ -20,13 +21,15 @@ export function IncidentBar({ incident }: { incident: IncidentView }) {
   return (
     <section className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-3 rounded-xl bg-card px-5 py-3.5 ring-1 ring-foreground/10">
       <div className="flex min-w-0 items-center gap-3">
-        <div className={`grid size-9 shrink-0 place-items-center rounded-lg ${open ? "bg-span-agent text-white" : "bg-secondary"}`}>
-          <Siren className="size-4" />
-        </div>
+        {!inline && (
+          <div className={`grid size-9 shrink-0 place-items-center rounded-lg ${open ? "bg-span-agent text-white" : "bg-secondary"}`}>
+            <Siren className="size-4" />
+          </div>
+        )}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Pill className="border-span-agent/40 bg-span-agent/10 text-span-agent">{incident.severity}</Pill>
-            <h2 className="truncate text-lg leading-tight">{incident.title}</h2>
+            {!inline && <h2 className="truncate text-lg leading-tight">{incident.title}</h2>}
           </div>
           <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
             impact {formatDuration(end - incident.impactAt)}

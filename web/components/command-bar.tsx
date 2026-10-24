@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatBytesShort } from "@/lib/format";
-import { useTower } from "@/lib/store";
+import { shouldPlan, useTower } from "@/lib/store";
 import { useSelectedTask } from "@/hooks/use-tasks";
 import { agentName, targetLabel } from "@/lib/spans";
 import { cn } from "@/lib/utils";
@@ -93,7 +93,7 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
       text,
       template: draft.template,
       attachments: draft.attachments.map((a) => a.id),
-      plan: draft.plan && draft.template !== "incident",
+      plan: shouldPlan(draft.plan, text, false) && draft.template !== "incident",
       taskId: task?.id ?? null,
     });
     if (sent) setDraft({ text: "", attachments: [] });
@@ -135,12 +135,10 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant={micOn ? "default" : "ghost"}
-                size="icon"
                 onClick={onToggleMic}
                 disabled={!connected}
                 aria-label={micOn ? "Stop listening" : "Talk"}
-                className={cn("relative shrink-0 rounded-xl", micOn && "bg-span-error text-white hover:bg-span-error/90")}
+                className={cn("relative h-10 shrink-0 gap-2 rounded-xl px-4 text-[14px]", micOn && "bg-span-error text-white hover:bg-span-error/90")}
               >
                 {micOn && (
                   <motion.span
@@ -151,13 +149,15 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   />
                 )}
                 {micOn && micStatus === "connecting" ? <Loader2 className="animate-spin" /> : <Mic />}
+                {micOn ? "Listening" : "Talk"}
+                {!micOn && <Kbd className="bg-primary-foreground/15 text-primary-foreground">Space</Kbd>}
               </Button>
             </TooltipTrigger>
             <TooltipContent>Click to talk, or hold Space</TooltipContent>
           </Tooltip>
 
           {micOn ? (
-            <p className={cn("min-h-9 flex-1 py-2 text-[15px] leading-snug", interim ? "text-foreground" : "text-muted-foreground")}>
+            <p className={cn("min-h-10 flex-1 py-1.5 font-heading text-xl leading-snug", interim ? "text-foreground" : "text-muted-foreground")} aria-live="polite">
               {interim || (micStatus === "listening" ? "Listening… speak to your agents" : "Connecting to speech service…")}
             </p>
           ) : (
@@ -220,7 +220,7 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
               <button onClick={() => selectTask(null)} className="rounded text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring">
                 start a new task instead
               </button>
-              <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={draft.plan} />
+              <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={shouldPlan(draft.plan, draft.text, false)} />
             </>
           ) : (
             <>
@@ -250,23 +250,19 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  role="switch"
-                  aria-checked={draft.plan}
-                  onClick={() => setDraft({ plan: !draft.plan })}
-                  className="ml-1 inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                  onClick={() => setDraft({ plan: ({ auto: "on", on: "off", off: "auto" } as const)[draft.plan] })}
+                  className="ml-1 inline-flex h-7 items-center gap-1 rounded-full border border-border px-2.5 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                  aria-label={`Planning: ${draft.plan}. Click to change.`}
                 >
-                  <span className={cn("relative h-3.5 w-6 rounded-full transition-colors", draft.plan ? "bg-foreground" : "bg-foreground/20")}>
-                    <span className={cn("absolute top-0.5 size-2.5 rounded-full bg-background transition-all", draft.plan ? "left-3" : "left-0.5")} />
-                  </span>
-                  Plan first
+                  Plan: <span className="font-medium text-foreground">{{ auto: "Auto", on: "Always", off: "Never" }[draft.plan]}</span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent className="max-w-64">
-                On: new work is analysed and outlined as steps for you to approve; then the planner decides how many agents to use. Off: one agent starts right away.
+              <TooltipContent className="max-w-72">
+                Auto: typed multi-part requests get a plan to approve first; short requests and anything you say start right away. Always / Never: override.
               </TooltipContent>
             </Tooltip>
           )}
-          <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={draft.plan} />
+          <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={shouldPlan(draft.plan, draft.text, false)} />
             </>
           )}
           <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground md:flex">
@@ -403,11 +399,11 @@ function Confirmation() {
         <span>Heard “{latest.utterance.slice(0, 60)}”, not an instruction, so nothing was sent.</span>
       ) : (
         <span>
-          <span className="text-foreground">→ {v.target === "plan" ? "the plan" : v.intent === "assign" && v.target === "new" ? "new task" : who(v.target)}</span> · {v.intent}
+          <span className="text-foreground">→ {v.intent === "incident" ? "incident" : v.target === "plan" ? "the plan" : v.intent === "assign" && v.target === "new" ? "new task" : who(v.target)}</span> · {v.intent === "incident" ? (v.incidentAction === "declare" ? "declare" : `mark ${v.incidentAction}`) : v.intent}
           {v.instruction ? `: ${v.instruction.slice(0, 90)}${v.instruction.length > 90 ? "…" : ""}` : ""}
         </span>
       )}
-      {v && <span className="ml-auto shrink-0 font-mono text-[10.5px]" title="Share of returned votes agreeing on the destination and intent; this is not a probability of correctness">{Math.round(v.confidence * 100)}% vote agreement</span>}
+      {v && <VoteDots votes={v.votes} />}
     </div>
   );
 }
@@ -419,4 +415,24 @@ function useNowTick(ms: number) {
     return () => clearInterval(id);
   }, [ms]);
   return now;
+}
+
+// The decision engine, visible: one block per router vote, filled when it
+// agreed with the winning reading.
+function VoteDots({ votes }: { votes: { count: number }[] }) {
+  const total = votes.reduce((n, v) => n + v.count, 0);
+  const agree = votes[0]?.count ?? 0;
+  return (
+    <span
+      className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[11px]"
+      title="Each instruction is read by several independent votes; the share that agree decides whether the tower acts or asks back"
+    >
+      <span className="flex gap-0.5" aria-hidden>
+        {Array.from({ length: total }, (_, i) => (
+          <span key={i} className={cn("h-2.5 w-1.5 rounded-[2px]", i < agree ? "bg-foreground" : "bg-foreground/20")} />
+        ))}
+      </span>
+      {agree}/{total} agree
+    </span>
+  );
 }
