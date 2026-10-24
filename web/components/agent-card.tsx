@@ -66,7 +66,7 @@ export function AgentCard({ agent }: { agent: AgentView }) {
             </Button>
           </div>
         </div>
-        <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">{agent.task}</p>
+        <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">{agent.title ?? agent.task}</p>
         {agent.approval && <ApprovalCard approval={agent.approval} compact />}
         <OutputChips agent={agent} onOpen={() => setFocus(agent.id)} />
       </div>

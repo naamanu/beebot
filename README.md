@@ -33,6 +33,17 @@ Everything starts in one place at the bottom of the Tower: type, or hold **Space
 - **Undo:** a new agent waits 4 seconds before it starts, with an Undo button.
 - **More:** the ⋯ menu has the four demo coding tasks, clearing standing rules, and resetting the board.
 
+## Plan first: the planner decides how many agents
+
+With **Plan first** on (the default), new General or Code work doesn't start an agent right away:
+
+1. **Plan:** a planner (Claude Opus) reads the task and a preview of the inputs (attached files, or the repo's file list), then outlines 3–8 steps with their dependencies and any risks.
+2. **Approve:** the plan appears as a card on the board. Approve, revise ("drop step 4, add a chart per region") or cancel, by voice ("approve the plan") or with the buttons. Revising re-plans with your note.
+3. **Allocate:** only then does the planner decide how many agents to use (1–4). It groups the steps into workstreams, says which wait on others, and whether a lead should combine the results (the lead owns the final integration steps). Small or sequential work gets one agent; independent, substantial pieces get one each.
+4. **Run:** each workstream is a normal agent on the board, so you can see, steer and trace it. Agents that wait on another start once it finishes: General agents receive its outputs, and Code agents branch from its commits. A General lead combines everyone's outputs into one report; a Code lead merges the branches and runs the tests.
+
+Turn Plan first off for quick one-agent tasks. Missions are saved; after a restart, finished missions come back read-only. `node scripts/e2e-mission.mjs "<task>" coding` runs one over the WebSocket, and `npx tsx scripts/allocate-check.ts` shows how the allocator splits a fixed plan.
+
 ## Incident response
 
 Say "declare an incident: checkout is failing" (or click **Declare incident**). Four investigators start on a simulated Shopfront outage:

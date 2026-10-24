@@ -29,10 +29,20 @@ export function createRun(root: string, template: string): Run {
 }
 
 // One git worktree per agent so they never trample each other's files.
-export function addWorktree(run: Run, agentId: string): string {
+// base: start from another agent's branch (for work that builds on it).
+export function addWorktree(run: Run, agentId: string, baseAgentId?: string | null): string {
   const dir = join(run.dir, `agent-${agentId}`);
-  git(run.repo, "worktree", "add", "-q", "-b", `agent-${agentId}`, dir);
+  git(run.repo, "worktree", "add", "-q", "-b", `agent-${agentId}`, dir, ...(baseAgentId ? [`agent-${baseAgentId}`] : []));
   return dir;
+}
+
+// The repo's tracked files, for planning code tasks.
+export function repoFiles(template: string): string[] {
+  try {
+    return execFileSync("git", ["ls-files"], { cwd: template, stdio: "pipe" }).toString().split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 // A plain working directory, for agents that don't need a code checkout.

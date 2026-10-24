@@ -58,6 +58,7 @@ export interface AgentOptions {
   workspace: string;
   restore?: AgentSnapshot;
   template?: Exclude<Template, "incident">; // default "coding"
+  mission?: { id: string; role: string; title?: string }; // a workstream (or the lead) of a planned mission
   // Incident agents use the shopfront tools instead of a code checkout.
   incident?: { incident: Incident; role: string };
   onApproval?: (agent: Agent, approval: Approval | null) => void;
@@ -74,6 +75,7 @@ export interface AgentSnapshot {
   sessionId: string | null;
   runId?: string | null;
   template?: Template;
+  mission?: { id: string; role: string; title?: string };
 }
 
 export class Agent {
@@ -157,7 +159,9 @@ export class Agent {
       costUsd: this.costUsd,
       runId: this.tracer.runId,
       template: this.template,
-      role: this.opts.incident?.role ?? null,
+      role: this.opts.incident?.role ?? this.opts.mission?.role ?? null,
+      missionId: this.opts.mission?.id ?? null,
+      title: this.opts.mission?.title ?? null,
       approval: this.pending?.approval ?? null,
       startsAt: this.startsAt,
     };
@@ -174,6 +178,7 @@ export class Agent {
       sessionId: this.sessionId,
       runId: this.tracer.runId,
       template: this.template,
+      mission: this.opts.mission,
     };
   }
 

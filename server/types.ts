@@ -18,7 +18,9 @@ export interface AgentView {
   costUsd: number;
   runId: string | null; // the run in progress, for linking to its trace
   template: Template;
-  role: string | null; // incident role, e.g. "Logs"
+  role: string | null; // incident role, or a mission workstream name
+  missionId: string | null;
+  title: string | null; // short description for cards when the task is a long generated prompt
   startsAt: number | null; // set while a new agent waits out its undo window
   approval: Approval | null; // a risky action waiting for a human
 }
@@ -103,7 +105,7 @@ export interface Decision {
 }
 
 export type ServerMsg =
-  | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null }
+  | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null; missions: MissionView[] }
   | { type: "agent_event"; id: string; event: AgentEvent; status: AgentStatus; runId: string | null; costUsd: number }
   | { type: "transcript"; text: string; final: boolean }
   | { type: "routing"; utterance: string }
@@ -115,7 +117,8 @@ export type ServerMsg =
 
 export type ClientMsg =
   | { type: "start"; tasks: string[] }
-  | { type: "say"; text: string; template?: Template; attachments?: string[] } // attachments: upload ids
+  | { type: "say"; text: string; template?: Template; attachments?: string[]; plan?: boolean } // attachments: upload ids; plan: plan first
+  | { type: "plan_decision"; missionId: string; decision: "approve" | "revise" | "cancel"; note?: string }
   | { type: "cancel_start"; id: string }
   | { type: "mic"; on: boolean }
   | { type: "reset" }
@@ -201,4 +204,51 @@ export interface TelemetrySummary {
   steers: number;
   p50Ms: number;
   p95Ms: number;
+}
+
+// --- Missions: plan first, approve, then decide how many agents ---
+
+export type MissionStatus = "planning" | "awaiting_approval" | "allocating" | "running" | "synthesizing" | "done" | "cancelled" | "failed";
+
+export interface PlanStep {
+  id: string; // "S1", "S2", …
+  title: string;
+  detail: string;
+  dependsOn: string[];
+}
+
+export interface Plan {
+  summary: string; // what the task is really asking, in one or two sentences
+  steps: PlanStep[];
+  risks: string[]; // ambiguities or things that could go wrong
+}
+
+export interface Workstream {
+  name: string; // short, e.g. "Data prep"
+  stepIds: string[];
+  after: string[]; // names of workstreams whose outputs it needs first
+  rationale: string;
+}
+
+export interface Allocation {
+  reasoning: string; // why this many agents
+  workstreams: Workstream[];
+  synthesis: boolean; // a lead combines the workstreams at the end
+  leadStepIds: string[]; // steps only the lead does (integration, final write-up)
+}
+
+export interface MissionView {
+  id: string;
+  request: string;
+  template: "general" | "coding";
+  files: string[];
+  status: MissionStatus;
+  plan: Plan | null;
+  revisions: string[]; // notes the operator gave when revising the plan
+  allocation: Allocation | null;
+  workers: { name: string; agentId: string | null; state: "waiting" | "running" | "done" | "error" }[];
+  leadAgentId: string | null;
+  costUsd: number; // planning + allocation calls (agents report their own cost)
+  createdAt: number;
+  error: string | null;
 }

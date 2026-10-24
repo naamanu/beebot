@@ -50,7 +50,7 @@ export function AgentStrip({ agents, compact = false }: { agents: AgentView[]; c
               <Dot className={cn("ml-auto", status.dot)} />
               <span className="font-mono text-[10.5px] text-muted-foreground">{status.label}</span>
             </span>
-            <span className="line-clamp-2 text-xs text-muted-foreground">{a.task}</span>
+            <span className="line-clamp-2 text-xs text-muted-foreground">{a.title ?? a.task}</span>
             {last && (
               <span className="flex min-w-0 items-center gap-1.5 font-mono text-[11px]">
                 <Dot className={EVENT_STYLE[last.kind].dot} />

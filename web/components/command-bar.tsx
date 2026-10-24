@@ -61,7 +61,7 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
   const submit = () => {
     if (!canSend) return;
     const text = draft.text.trim() || "Analyze the attached files and summarize what matters.";
-    send({ type: "say", text, template: draft.template, attachments: draft.attachments.map((a) => a.id) });
+    send({ type: "say", text, template: draft.template, attachments: draft.attachments.map((a) => a.id), plan: draft.plan && draft.template !== "incident" });
     setDraft({ text: "", attachments: [] });
   };
 
@@ -193,7 +193,27 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
               <TooltipContent className="max-w-64">{t.hint}</TooltipContent>
             </Tooltip>
           ))}
-          <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} />
+          {draft.template !== "incident" && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  role="switch"
+                  aria-checked={draft.plan}
+                  onClick={() => setDraft({ plan: !draft.plan })}
+                  className="ml-1 inline-flex h-6 items-center gap-1.5 rounded-full border border-border px-2 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <span className={cn("relative h-3.5 w-6 rounded-full transition-colors", draft.plan ? "bg-foreground" : "bg-foreground/20")}>
+                    <span className={cn("absolute top-0.5 size-2.5 rounded-full bg-background transition-all", draft.plan ? "left-3" : "left-0.5")} />
+                  </span>
+                  Plan first
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-64">
+                On: new work is analysed and outlined as steps for you to approve; then the planner decides how many agents to use. Off: one agent starts right away.
+              </TooltipContent>
+            </Tooltip>
+          )}
+          <PreviewLine preview={preview} template={draft.template} hasFiles={draft.attachments.length > 0} incidentActive={!!incident} plan={draft.plan} />
           <span className="ml-auto hidden items-center gap-1 text-[11px] text-muted-foreground md:flex">
             <Kbd>Space</Kbd> talk · <Kbd>⌘K</Kbd> focus · <Kbd>⏎</Kbd> send
           </span>
@@ -261,18 +281,21 @@ function PreviewLine({
   template,
   hasFiles,
   incidentActive,
+  plan,
 }: {
   preview: RoutePreview | "loading" | null;
   template: Template;
   hasFiles: boolean;
   incidentActive: boolean;
+  plan: boolean;
 }) {
   if (!preview) return null;
   if (preview === "loading") return <span className="ml-2 font-mono text-[11px] text-muted-foreground">→ …</span>;
-  return <span className="ml-2 truncate font-mono text-[11px] text-foreground/80">→ {describe(preview, template, hasFiles, incidentActive)}</span>;
+  return <span className="ml-2 truncate font-mono text-[11px] text-foreground/80">→ {describe(preview, template, hasFiles, incidentActive, plan)}</span>;
 }
 
-function describe(p: RoutePreview, template: Template, hasFiles: boolean, incidentActive: boolean): string {
+function describe(p: RoutePreview, template: Template, hasFiles: boolean, incidentActive: boolean, plan: boolean): string {
+  if (p.target === "plan") return p.intent === "approve" ? "approve the plan" : p.intent === "stop" ? "cancel the plan" : "revise the plan";
   if (p.target === "unclear") return "unclear: will ask which agent";
   if (p.intent === "chatter" || p.target === "none") return "not for an agent: will be ignored";
   if (p.intent === "incident") return p.incidentAction === "declare" ? "declare an incident" : `mark incident ${p.incidentAction}`;
@@ -280,6 +303,7 @@ function describe(p: RoutePreview, template: Template, hasFiles: boolean, incide
   if (p.intent === "assign" && p.target === "new") {
     if (template === "incident" && !incidentActive) return "declare an incident";
     const kind = template === "general" || hasFiles ? "General" : "Code";
+    if (plan) return `plan a ${kind} task${hasFiles ? " on the attached files" : ""}, then decide how many agents`;
     return `new ${kind} agent${hasFiles ? " with the attached files" : ""}`;
   }
   const who = p.target === "all" ? "all agents" : `agent ${p.target}`;

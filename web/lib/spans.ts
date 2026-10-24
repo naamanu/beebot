@@ -34,6 +34,7 @@ export function targetLabel(target: string): string {
   if (target === "none") return "nobody";
   if (target === "unclear") return "unclear";
   if (target === "new") return "new agent";
+  if (target === "plan") return "the plan";
   return `agent ${target}`;
 }
 

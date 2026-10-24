@@ -11,6 +11,7 @@ import { RulesPanel } from "@/components/rules-panel";
 import { TopBar } from "@/components/top-bar";
 import { CommandBar, attachFiles } from "@/components/command-bar";
 import { OutputsPanel } from "@/components/outputs-panel";
+import { MissionPanel } from "@/components/mission-card";
 import { useState } from "react";
 import { useMic } from "@/hooks/use-mic";
 import { useRoute } from "@/hooks/use-route";
@@ -21,6 +22,7 @@ import { ApprovalsPanel, FindingsPanel } from "@/components/incident/findings-pa
 import { IncidentBar } from "@/components/incident/incident-bar";
 import { PostmortemPage } from "@/components/incident/postmortem-page";
 import { connectTower, useTower } from "@/lib/store";
+import { cn } from "@/lib/utils";
 import type { AgentView } from "../server/types.ts";
 
 // Fill the available space whatever the agent count: 1 → full, 2 → side by
@@ -52,6 +54,7 @@ export function App() {
   const agents = useTower((s) => s.agents);
   const focused = useTower((s) => s.focused);
   const incident = useTower((s) => s.incident);
+  const hasMissions = useTower((s) => s.missions.some((m) => m.status !== "cancelled"));
   const [dragging, setDragging] = useState(false);
   const mic = useMic();
   const route = useRoute();
@@ -92,7 +95,8 @@ export function App() {
             </div>
           )}
           {incident && <IncidentBar incident={incident} />}
-          <main className="flex min-h-0 min-w-0 flex-1 gap-3">
+          {!open && <MissionPanel grow={agents.length === 0} />}
+          <main className={cn("flex min-h-0 min-w-0 flex-1 gap-3", !open && agents.length === 0 && hasMissions && "hidden")}>
             {open ? (
               <>
                 <FocusView agent={open} />
@@ -100,7 +104,7 @@ export function App() {
                 {agents.length > 1 && <AgentStrip agents={agents.filter((a) => a.id !== open.id)} compact={open.template === "general"} />}
               </>
             ) : agents.length === 0 ? (
-              <EmptyState />
+              hasMissions ? null : <EmptyState />
             ) : (
               <AgentGrid agents={agents} />
             )}

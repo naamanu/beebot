@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import { invalidateTelemetry } from "./api.ts";
-import type { AgentView, ClientMsg, IncidentView, RouteVerdict, ServerMsg, Template, Upload } from "../../server/types.ts";
+import type { AgentView, ClientMsg, IncidentView, MissionView, RouteVerdict, ServerMsg, Template, Upload } from "../../server/types.ts";
 
 export interface FeedItem {
   id: number;
@@ -16,6 +16,7 @@ export interface Draft {
   text: string;
   template: Template;
   attachments: (Upload & { uploading?: boolean })[];
+  plan: boolean; // plan first, approve, then decide how many agents
 }
 
 interface TowerState {
@@ -23,6 +24,7 @@ interface TowerState {
   agents: AgentView[];
   rules: string[];
   incident: IncidentView | null;
+  missions: MissionView[];
   interim: string;
   feed: FeedItem[];
   levels: number[]; // recent mic levels, newest last
@@ -45,12 +47,13 @@ export const useTower = create<TowerState>()((set, get) => ({
   agents: [],
   rules: [],
   incident: null,
+  missions: [],
   interim: "",
   feed: [],
   levels: [],
   steeredAt: {},
   focused: null,
-  draft: { text: "", template: "general", attachments: [] },
+  draft: { text: "", template: "general", attachments: [], plan: true },
   setDraft: (patch) => set({ draft: { ...get().draft, ...patch } }),
   setFocus: (id) => {
     set({ focused: id });
@@ -73,6 +76,7 @@ function handle(m: ServerMsg): void {
       set((s) => ({
         agents: m.agents,
         incident: m.incident,
+        missions: m.missions,
         focused: s.focused && m.agents.some((a) => a.id === s.focused) ? s.focused : null,
         rules: m.rules,
         // On (re)connect the server's history is the source of truth for the feed.

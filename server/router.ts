@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { estimateCost } from "./pricing.ts";
-import type { AgentView, IncidentAction, IncidentView, Intent, RouteVerdict } from "./types.ts";
+import type { AgentView, IncidentAction, IncidentView, Intent, MissionView, RouteVerdict } from "./types.ts";
 
 // The decision engine. Every spoken turn is classified by N independent
 // votes; the share of votes that agree is the confidence. High confidence
@@ -19,6 +19,7 @@ export interface RouterContext {
   focused?: string | null; // agent the operator has open in the UI
   incident?: IncidentView | null;
   attachments?: string[]; // names of files attached to this instruction
+  pendingPlan?: MissionView | null; // a plan waiting for the operator's approval
 }
 
 export class Router {
@@ -40,7 +41,14 @@ export class Router {
 
   async route(utterance: string, ctx: RouterContext, votes = this.votes): Promise<RouteVerdict> {
     const started = Date.now();
-    const targets: [string, ...string[]] = ["new", "all", "none", "unclear", ...ctx.agents.map((a) => a.id)];
+    const targets: [string, ...string[]] = [
+      "new",
+      "all",
+      "none",
+      "unclear",
+      ...(ctx.pendingPlan ? ["plan"] : []),
+      ...ctx.agents.map((a) => a.id),
+    ];
     const schema = z.object({
       target: z.enum(targets).describe("Which agent the operator is addressing"),
       intent: z.enum(INTENTS),
@@ -125,7 +133,7 @@ function mode<T>(xs: T[]): T {
 // exact options the router was torn between.
 export function clarifyingQuestion(v: RouteVerdict, agents: AgentView[]): string {
   const label = (t: string) =>
-    t === "all" ? "all agents" : t === "none" ? "nobody" : t === "new" ? "a new agent" : `agent ${t}`;
+    t === "all" ? "all agents" : t === "none" ? "nobody" : t === "new" ? "a new agent" : t === "plan" ? "the plan" : `agent ${t}`;
   const [a, b] = v.votes;
   if (a?.target === "unclear") return "Which agent was that for, and what should it do?";
   const isNoop = (x: { target: string; intent: Intent }) => x.target === "none" || x.target === "unclear" || x.intent === "chatter";
@@ -155,6 +163,11 @@ function approvalsBlock(agents: AgentView[]): string {
   return `\n<waiting_for_approval>\n${waiting.map((a) => `Agent ${a.id} wants to: ${a.approval!.summary}`).join("\n")}\nA bare "approve"/"yes"/"do it" with one agent waiting is for that agent.\n</waiting_for_approval>\n`;
 }
 
+function planBlock(m: MissionView | null | undefined): string {
+  if (!m?.plan) return "";
+  return `\n<plan_awaiting_approval>\nA plan for “${m.request}” is waiting for the operator:\n${m.plan.steps.map((s) => `${s.id} ${s.title}`).join("\n")}\nTo answer it, use target "plan": "approve the plan" / "looks good, go" → approve; "cancel that" → stop; any change to the steps ("drop step 3", "also add a chart") → correct, with the change as the instruction.\n</plan_awaiting_approval>\n`;
+}
+
 function incidentBlock(incident: IncidentView | null | undefined): string {
   if (!incident) return "\nNo incident is active. Words like \"declare an incident\" or \"we have an outage\" start one.\n";
   return `\n<incident>Active ${incident.severity} incident "${incident.title}", status ${incident.status}.</incident>\n`;
@@ -176,7 +189,7 @@ function buildPrompt(utterance: string, ctx: RouterContext): string {
 <agents>
 ${agents || "(no agents yet: anything that sounds like work to do is an assign to a new agent)"}
 </agents>
-${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}${
+${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}${planBlock(ctx.pendingPlan)}${
   ctx.attachments?.length
     ? `\nThe operator attached files to this instruction: ${ctx.attachments.join(", ")}. Starting work on them is an assign (target "new" unless they name an agent).\n`
     : ""

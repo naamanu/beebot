@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { basename, dirname, extname, join } from "node:path";
@@ -9,12 +9,13 @@ import { Agent, type AgentSnapshot } from "./agents.ts";
 import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
 import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
 import { writePostmortem } from "./incident/postmortem.ts";
+import { Mission, type SpawnRequest } from "./missions/mission.ts";
 import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { Approval, ClientMsg, Decision, IncidentStatus, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
-import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, type Run } from "./workspace.ts";
+import type { Approval, ClientMsg, Decision, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
+import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, repoFiles, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT ?? 8787);
@@ -45,19 +46,28 @@ let routing = Promise.resolve(); // utterances are routed one at a time, in orde
 let incident: Incident | null = null;
 let callNotes: JamieMeeting | null = null; // the war-room call, from Jamie
 let incidentTimer: ReturnType<typeof setInterval> | undefined;
+// Planned tasks. Live missions run here; after a restart, earlier ones come
+// back read-only (their agents are restored, the orchestration is not).
+let missions: Mission[] = [];
+let archivedMissions: MissionView[] = [];
 
 function broadcast(msg: ServerMsg): void {
   const data = JSON.stringify(msg);
   for (const c of clients) if (c.readyState === c.OPEN) c.send(data);
 }
 
+function missionViews(): MissionView[] {
+  return [...missions.map((m) => m.view()), ...archivedMissions].slice(0, 10);
+}
+
 function state(): ServerMsg {
-  return { type: "state", agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null };
+  return { type: "state", agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
 }
 
 // --- Session persistence: the server can restart without losing agents. ---
 
 interface SavedSession {
+  missions?: MissionView[];
   run: Run | null;
   agents: AgentSnapshot[];
   decisions: Decision[];
@@ -73,16 +83,25 @@ function save(): void {
 
 function saveNow(): void {
   clearTimeout(saveTimer);
-  const data: SavedSession = { run, agents: agents.map((a) => a.snapshot()), decisions, recent: recent.slice(-10) };
+  const data: SavedSession = { run, agents: agents.map((a) => a.snapshot()), decisions, recent: recent.slice(-10), missions: missionViews() };
   mkdirSync(dirname(SESSION_FILE), { recursive: true });
   writeFileSync(SESSION_FILE, JSON.stringify(data));
 }
 
-function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapshot, role?: string, template?: Template): Agent {
+function makeAgent(
+  id: string,
+  task: string,
+  cwd: string,
+  restore?: AgentSnapshot,
+  role?: string,
+  template?: Template,
+  mission?: { id: string; role: string; title?: string },
+): Agent {
   const t = template ?? restore?.template;
   return new Agent({
+    mission,
     template: t === "general" ? "general" : "coding",
-    incident: incident && role ? { incident, role } : undefined,
+    incident: incident && role && !mission ? { incident, role } : undefined,
     onApproval: (agent, approval) => onApproval(agent, approval),
     id,
     task,
@@ -95,6 +114,11 @@ function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapsho
     onEvent: (agentId, event, status) => {
       const agent = agents.find((a) => a.id === agentId);
       broadcast({ type: "agent_event", id: agentId, event, status, runId: agent?.runId ?? null, costUsd: agent?.costUsd ?? 0 });
+      // A mission's agent finished: let the mission start what comes next.
+      const missionId = agent?.view().missionId;
+      if (missionId && (event.kind === "result" || (event.kind === "error" && status !== "working"))) {
+        missions.find((m) => m.id === missionId)?.onAgentFinished(agentId, event.kind === "result");
+      }
       save();
     },
   });
@@ -111,7 +135,11 @@ function restoreSession(): void {
     // Incident agents can't come back: their simulated production is gone.
     agents = saved.agents
       .filter((a) => existsSync(a.cwd) && a.template !== "incident")
-      .map((a) => makeAgent(a.id, a.task, a.cwd, a));
+      .map((a) => makeAgent(a.id, a.task, a.cwd, a, a.mission?.role, undefined, a.mission));
+    // Missions that were mid-flight can't resume their orchestration.
+    archivedMissions = (saved.missions ?? []).map((m) =>
+      /done|cancelled|failed/.test(m.status) ? m : { ...m, status: "failed", error: "The server restarted before this task finished." },
+    );
     // Agents that were mid-task when the server stopped carry on by themselves.
     const interrupted = agents.filter((a) => a.status === "working" || a.status === "starting");
     for (const a of interrupted) a.resumeAfterRestart();
@@ -126,6 +154,8 @@ function restoreSession(): void {
 function resetSession(): void {
   for (const a of agents) a.close("reset");
   agents = [];
+  missions = [];
+  archivedMissions = [];
   endIncident();
   run = null;
   recent = [];
@@ -173,14 +203,27 @@ function formatBytes(n: number): string {
 // with inputs/ and outputs/. With undo, it waits UNDO_MS before starting.
 function spawnAgent(
   task: string,
-  { quiet = false, template = "coding" as Exclude<Template, "incident">, files = [] as AttachedFile[], undo = false } = {},
+  {
+    quiet = false,
+    template = "coding" as Exclude<Template, "incident">,
+    files = [] as AttachedFile[],
+    undo = false,
+    mission = undefined as { id: string; role: string; title?: string } | undefined,
+    inputsFrom = [] as SpawnRequest["inputsFrom"],
+    baseAgentId = null as string | null,
+  } = {},
 ): Agent {
   run ??= createRun(ROOT, TEMPLATE);
   const id = String(agents.reduce((max, a) => Math.max(max, Number(a.id)), 0) + 1);
-  const cwd = template === "general" ? addScratchDir(run, id) : addWorktree(run, id);
+  const cwd = template === "general" ? addScratchDir(run, id) : addWorktree(run, id, baseAgentId);
   if (template === "general") mkdirSync(join(cwd, "outputs"), { recursive: true });
+  // Another agent's outputs, for work that builds on it.
+  for (const from of inputsFrom) {
+    const src = agents.find((a) => a.id === from.agentId);
+    if (src && existsSync(join(src.cwd, "outputs"))) cpSync(join(src.cwd, "outputs"), join(cwd, "inputs", from.as), { recursive: true });
+  }
   const fullTask = task + attach(files, cwd, template === "general" ? "inputs" : "attachments");
-  const agent = makeAgent(id, fullTask, cwd, undefined, undefined, template);
+  const agent = makeAgent(id, fullTask, cwd, undefined, mission?.role, template, mission);
   agents.push(agent);
   if (undo) {
     agent.beginAfter(UNDO_MS, () => {
@@ -192,6 +235,59 @@ function spawnAgent(
   save();
   if (!quiet) broadcast({ type: "notice", level: "info", text: `Agent ${id} ${undo ? "starts in a moment" : "is on it"}: ${task}` });
   return agent;
+}
+
+// --- Missions: plan first, approve, then decide how many agents ---
+
+function readHead(path: string): string | null {
+  if (!/\.(csv|tsv|txt|md|json|jsonl|log|yaml|yml|xml|html|py|js|ts|sql)$/i.test(path)) return null;
+  const all = readFileSync(path, "utf8");
+  const lines = all.split("\n").filter((l) => l.length);
+  const head = lines.slice(0, 20).join("\n").slice(0, 2500);
+  return lines.length > 20 ? `[first 20 of ${lines.length} lines]\n${head}` : head;
+}
+
+function createMission(request: string, template: "general" | "coding", files: AttachedFile[]): Mission {
+  const mission = new Mission(
+    {
+      template,
+      request,
+      files: files.map((f) => ({ name: f.name, size: f.size, head: readHead(f.path) })),
+      repoFiles: template === "coding" ? repoFiles(TEMPLATE) : [],
+    },
+    {
+      spawn: (m, req) =>
+        spawnAgent(req.task, {
+          quiet: true,
+          template: m.template,
+          files,
+          mission: { id: m.id, role: req.role, title: req.title },
+          inputsFrom: req.inputsFrom,
+          baseAgentId: req.baseAgentId,
+        }).id,
+      changed: () => {
+        broadcast(state());
+        save();
+      },
+      speak: (text) => broadcast({ type: "speak", text }),
+    },
+  );
+  missions = [mission, ...missions].slice(0, 10);
+  save();
+  void mission.start();
+  return mission;
+}
+
+function decidePlan(missionId: string | null, decision: "approve" | "revise" | "cancel", note = ""): void {
+  const mission = missionId ? missions.find((m) => m.id === missionId) : missions.find((m) => m.status === "awaiting_approval");
+  if (!mission) return;
+  if (decision === "approve") void mission.approve();
+  else if (decision === "revise") void mission.revise(note);
+  else {
+    mission.cancel();
+    // Cancelling a running mission stops its agents too.
+    for (const a of agents) if (a.view().missionId === mission.id && a.status === "working") void a.stop("Task cancelled");
+  }
 }
 
 function cancelStart(id: string): void {
@@ -272,6 +368,7 @@ function agentLabel(a: Agent): string {
 interface HearOptions {
   template?: Template;
   files?: AttachedFile[];
+  plan?: boolean; // plan first, then decide how many agents
 }
 
 function hear(utterance: string, focused: string | null, opts: HearOptions = {}): void {
@@ -290,6 +387,7 @@ async function routeAndApply(utterance: string, focused: string | null, opts: He
     focused,
     incident: incident?.view() ?? null,
     attachments: opts.files?.map((f) => f.name),
+    pendingPlan: missions.find((m) => m.status === "awaiting_approval")?.view() ?? null,
   });
   recent.push(utterance);
   telemetry.recordDecision(verdict);
@@ -321,6 +419,13 @@ async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
     else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
     return;
   }
+  // A plan is waiting for approval and this answers it.
+  if (v.target === "plan") {
+    if (v.intent === "approve") decidePlan(null, "approve");
+    else if (v.intent === "stop") decidePlan(null, "cancel");
+    else decidePlan(null, "revise", v.instruction || v.utterance);
+    return;
+  }
   incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
   // Yes or no to an agent that is waiting for approval.
   const waiting = agents.filter((a) => a.approval && (v.target === a.id || v.target === "all"));
@@ -348,6 +453,10 @@ async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
       return;
     }
     const template = opts.template === "general" || opts.files?.length ? "general" : "coding";
+    if (opts.plan) {
+      createMission(v.instruction, template, opts.files ?? []);
+      return;
+    }
     spawnAgent(v.instruction, { template, files: opts.files, undo: true }).traceRouter(v);
     return;
   }
@@ -457,7 +566,7 @@ wss.on("connection", (ws) => {
         }
         break;
       case "say":
-        if (msg.text.trim()) hear(msg.text.trim(), focused, { template: msg.template, files: resolveUploads(msg.attachments) });
+        if (msg.text.trim()) hear(msg.text.trim(), focused, { template: msg.template, files: resolveUploads(msg.attachments), plan: msg.plan });
         break;
       case "mic":
         if (msg.on && !mic) {
@@ -496,6 +605,9 @@ wss.on("connection", (ws) => {
       }
       case "reset":
         resetSession();
+        break;
+      case "plan_decision":
+        decidePlan(msg.missionId, msg.decision, msg.note);
         break;
       case "cancel_start":
         cancelStart(msg.id);
@@ -569,6 +681,7 @@ async function workApi(
   if (url.pathname === "/api/preview" && req.method === "POST") {
     const { text, attachments } = JSON.parse(await readBody(req)) as { text: string; attachments?: string[] };
     const v = await router.preview(text, {
+      pendingPlan: missions.find((m) => m.status === "awaiting_approval")?.view() ?? null,
       agents: agents.map((a) => a.view()),
       rules: rules.list(),
       recent: recent.slice(-4),

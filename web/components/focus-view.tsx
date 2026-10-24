@@ -71,7 +71,7 @@ export function FocusView({ agent }: { agent: AgentView }) {
             </Button>
           </div>
         </div>
-        <p className="text-sm leading-snug text-muted-foreground">{agent.task}</p>
+        <p className="text-sm leading-snug text-muted-foreground">{agent.title ?? agent.task}</p>
         {agent.approval && <ApprovalCard approval={agent.approval} />}
       </header>
 
