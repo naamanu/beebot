@@ -36,11 +36,11 @@ export function FindingsPanel({ incident }: { incident: IncidentView }) {
       ) : (
         <ul className="flex flex-col gap-2">
           <AnimatePresence initial={false}>
-            {[...incident.findings].reverse().map((f) => (
-              <motion.li key={f.at} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="text-[13px] leading-snug">
+            {[...incident.findings].reverse().map((f, i) => (
+              <motion.li key={incident.findings.length - i} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="text-[13px] leading-snug">
                 <span className="mb-0.5 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
                   <Dot className={ROLE_DOT[f.role] ?? "bg-muted-foreground"} />
-                  {f.role} · {new Date(f.at).toLocaleTimeString()}
+                  #{incident.findings.length - i} · {f.role} · {new Date(f.at).toLocaleTimeString()}
                 </span>
                 {f.text}
               </motion.li>

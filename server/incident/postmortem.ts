@@ -18,6 +18,15 @@ export async function writePostmortem(incident: Incident, runs: RunRow[], call: 
   const callNotes = call
     ? `<call_notes source="Jamie" title="${call.title}">\n${call.summary.markdown}\n\nAction items from the call:\n${call.tasks.map((t) => `- ${t.content}${t.assignee?.name ? ` (${t.assignee.name})` : ""}`).join("\n")}\n</call_notes>`
     : "<call_notes>none recorded</call_notes>";
+  const skipped = v.skippedInvestigation;
+  const recovery = skipped?.demoRecoveryAt !== undefined
+    ? `Simulated services were explicitly reset to healthy at ${iso(skipped.demoRecoveryAt)} for the demo. This ends simulated impact only. Do not attribute recovery to an agent fix, rollback, or a proven diagnosis. Keep unanswered checks open.`
+    : skipped?.recoveryConfirmed
+      ? "Recovery was confirmed by metrics."
+      : "Do not claim the service recovered or was mitigated, or present impact duration as complete; recovery remains unconfirmed.";
+  const closure = skipped
+    ? `The commander explicitly skipped further investigation at ${iso(skipped.at)}. ${recovery}\nAssessment: ${skipped.reason}\nOpen checks to retain in action items:\n${skipped.openQuestions.map((q) => `- ${q}`).join("\n")}`
+    : "No investigation checks were explicitly skipped.";
 
   const prompt = `Write a blameless incident postmortem in Markdown from the records below. Use only facts in the records; where something is unknown, say so rather than guessing.
 
@@ -32,13 +41,17 @@ Sections, in order:
 ## What went well / What was hard
 ## Action items (a table with Action | Owner | Priority; owners from the call notes where given, otherwise "unassigned")
 
-<incident title="${v.title}" severity="${v.severity}" status="${v.status}" impact_start="${iso(v.impactAt)}" declared="${iso(v.declaredAt)}" mitigated="${v.mitigatedAt ? iso(v.mitigatedAt) : "not yet"}">
+<incident title="${v.title}" severity="${v.severity}" status="${skipped?.demoRecoveryAt !== undefined ? "resolved by demo reset; open questions retained" : skipped && !skipped.recoveryConfirmed ? "investigation closed; recovery unconfirmed" : v.status}" impact_start="${iso(v.impactAt)}" declared="${iso(v.declaredAt)}" mitigated="${v.mitigatedAt ? iso(v.mitigatedAt) : "not yet"}">
 Peak checkout error rate in the last 15 minutes: ${Math.max(...v.errorRate.map((p) => p.v)).toFixed(1)}%. Current: ${v.errorRate.at(-1)?.v.toFixed(1)}%.
 </incident>
 
 <timeline>
 ${timeline}
 </timeline>
+
+<investigation_closure>
+${closure}
+</investigation_closure>
 
 <deploys>
 ${deploys}

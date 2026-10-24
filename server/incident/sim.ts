@@ -26,7 +26,7 @@ export interface StatusPost {
 
 export type Metric = "error_rate" | "p95_latency_ms" | "rps" | "db_pool_in_use" | "cache_hit_ratio";
 
-export const SERVICES = ["web-frontend", "checkout-api", "payments-api", "search-api", "cdn"] as const;
+export const SERVICES = ["web-frontend", "checkout-api", "payments-api", "payment-provider", "search-api", "cdn"] as const;
 export type Service = (typeof SERVICES)[number];
 
 export class ShopfrontSim {
@@ -36,6 +36,9 @@ export class ShopfrontSim {
   private restartedAt: number | null = null;
   private badId: string | null = null; // the deploy that broke payments, if any
   private cdnId: string | null = null; // the unrelated CDN change (a red herring)
+  private providerOutageAt: number | null = null;
+  private providerRecoveredAt: number | null = null;
+  private demoRestoredAt: number | null = null;
 
   // outage: start with the classic drill already 9 minutes in. Without it the
   // store is healthy until injectOutage() lands a bad deploy.
@@ -67,6 +70,9 @@ export class ShopfrontSim {
   // A "perf tuning" deploy shrinks the payments DB pool; a CDN TTL change
   // lands a little later and muddies the water.
   injectOutage(at = Date.now(), cdnAt = at + 100_000): { badDeployId: string } {
+    this.demoRestoredAt = null;
+    this.providerOutageAt = null;
+    this.providerRecoveredAt = null;
     const nextId = () => String(Math.max(...this.deploys.map((d) => Number(d.id))) + 1);
     this.badId = nextId();
     this.deploys.push({
@@ -92,22 +98,46 @@ export class ShopfrontSim {
     return { badDeployId: this.badId };
   }
 
+  // An external dependency fails with no causal local deploy. Neither a local
+  // rollback nor a pod restart can restore the provider.
+  injectProviderOutage(at = Date.now()): void {
+    this.demoRestoredAt = null;
+    this.badId = null;
+    this.cdnId = null;
+    this.restartedAt = null;
+    this.providerOutageAt = at;
+    this.providerRecoveredAt = null;
+  }
+
+  recoverProvider(at = Date.now()): boolean {
+    if (this.providerOutageAt === null || this.fixedAt !== null) return false;
+    this.providerRecoveredAt = at;
+    return true;
+  }
+
+  // Explicit demo control: restore current health immediately without inventing
+  // a rollback or rewriting the evidence from before the reset.
+  restoreForDemo(at = Date.now()): void {
+    this.demoRestoredAt ??= at;
+  }
+
   get badDeploy(): Deploy | null {
     return this.deploys.find((d) => d.id === this.badId) ?? null;
   }
 
   // When the current outage began (or the start of the simulation if healthy).
   get impactAt(): number {
-    return this.badDeploy?.at ?? this.startedAt;
+    return this.providerOutageAt ?? this.badDeploy?.at ?? this.startedAt;
   }
 
   get fixedAt(): number | null {
-    return this.badDeploy?.rolledBackAt ?? null;
+    const fixed = this.providerOutageAt !== null ? this.providerRecoveredAt : this.badDeploy?.rolledBackAt ?? null;
+    return fixed ?? this.demoRestoredAt;
   }
 
   // An outage that hasn't been fixed yet.
   get broken(): boolean {
-    return !!this.badDeploy && this.fixedAt === null;
+    return (this.providerOutageAt !== null || !!this.badDeploy) && this.fixedAt === null;
   }
 
   private cdnChangeAt(): number | null {
@@ -116,11 +146,12 @@ export class ShopfrontSim {
 
   // 0 = healthy, 1 = full outage, for the payments path at time t.
   private severity(t: number): number {
-    if (!this.badDeploy || t < this.impactAt) return 0;
+    if (this.demoRestoredAt !== null && t >= this.demoRestoredAt) return 0;
+    if ((this.providerOutageAt === null && !this.badDeploy) || t < this.impactAt) return 0;
     const ramp = Math.min(1, (t - this.impactAt) / (1.5 * MIN));
     const fixed = this.fixedAt;
     if (fixed !== null && t >= fixed) return ramp * Math.max(0, 1 - (t - fixed) / (0.75 * MIN)); // recovers over ~45s
-    if (this.restartedAt !== null && t >= this.restartedAt && t < this.restartedAt + 40_000) {
+    if (this.providerOutageAt === null && this.restartedAt !== null && t >= this.restartedAt && t < this.restartedAt + 40_000) {
       return ramp * Math.min(1, 0.25 + (t - this.restartedAt) / 40_000); // brief relief, then back
     }
     return ramp;
@@ -138,6 +169,10 @@ export class ShopfrontSim {
         return Math.max(0, 0.2 + s * 41 + noise(3) * (0.1 + s * 2));
       case "payments-api:p95_latency_ms":
         return 120 + s * 5100 + noise(4) * 15;
+      case "payment-provider:error_rate":
+        return this.providerOutageAt !== null && (this.demoRestoredAt === null || t < this.demoRestoredAt) ? Math.max(0, 0.1 + s * 85 + noise(13)) : 0.1;
+      case "payment-provider:p95_latency_ms":
+        return this.providerOutageAt !== null ? 220 + s * 5500 + noise(14) * 15 : 220;
       case "payments-api:db_pool_in_use": {
         const max = !this.badDeploy || (this.fixedAt !== null && t >= this.fixedAt) ? 50 : t >= this.impactAt ? 5 : 50;
         return max === 5 ? Math.min(5, 1 + s * 4 + Math.abs(noise(5))) : 9 + noise(5) * 3;
@@ -186,6 +221,10 @@ export class ShopfrontSim {
     const pool = !this.badDeploy || (this.fixedAt !== null && t >= this.fixedAt) ? 50 : t >= this.impactAt ? 5 : 50;
     switch (service) {
       case "payments-api":
+        if (this.providerOutageAt !== null && s > 0.3)
+          return i % 2 === 0
+            ? `ERROR upstream payment-provider POST /charges 503 provider_request=pr_${id(1)} region=eu; local DB pool healthy (max=50, in_use=9)`
+            : `WARN payment-provider unavailable; no local connection acquisition timeouts; circuit open`;
         if (s > 0.3)
           return i % 3 === 0
             ? `ERROR db: timeout acquiring connection from pool (max=${pool}, in_use=${pool}, waiting=${Math.round(80 + s * 140)}) charge=ch_${id(1)}`
@@ -193,6 +232,10 @@ export class ShopfrontSim {
               ? `WARN retry ${2 + (i % 5)}/6 for charge=ch_${id(2)} after pool timeout`
               : `ERROR POST /v1/charges 503 ${Math.round(4000 + s * 1100)}ms`;
         return i % 4 === 0 ? `INFO POST /v1/charges 200 ${110 + (i % 30)}ms pool=${pool}` : null;
+      case "payment-provider":
+        if (this.providerOutageAt !== null && s > 0.3)
+          return `ERROR external health probe /charges 503 region=eu provider_request=pr_${id(1)}; provider status: elevated API errors`;
+        return i % 4 === 0 ? "INFO external health probe /charges 200 region=eu" : null;
       case "checkout-api":
         if (s > 0.3) return i % 2 === 0 ? `ERROR upstream payments-api POST /v1/charges 504 after 5000ms order=or_${id(3)}` : `WARN circuit half-open for payments-api`;
         return i % 5 === 0 ? `INFO POST /checkout 200 ${160 + (i % 40)}ms` : null;
@@ -212,6 +255,7 @@ export class ShopfrontSim {
   rollback(deployId: string, now = Date.now()): string {
     const d = this.deploys.find((x) => x.id === deployId);
     if (!d) return `No deploy #${deployId}.`;
+    if (d.at > now) return `Deploy #${deployId} has not landed yet.`;
     if (d.rolledBackAt) return `Deploy #${deployId} was already rolled back.`;
     d.rolledBackAt = now;
     this.deploys.push({
@@ -230,6 +274,7 @@ export class ShopfrontSim {
   }
 
   restart(service: Service, now = Date.now()): string {
+    if (service === "payment-provider") return "The payment provider is externally operated; local pods cannot restart it.";
     if (service === "payments-api") this.restartedAt = now;
     return `Restarted ${service}: 6/6 pods ready.`;
   }

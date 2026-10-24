@@ -15,7 +15,7 @@ export function ErrorRateChart({ incident }: { incident: IncidentView }) {
   const x = (t: number) => ((t - t0) / (t1 - t0)) * W;
   const y = (v: number) => H - 2 - (v / max) * (H - 6);
   const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
-  const actions = incident.timeline.filter((e) => e.kind === "action" && e.at >= t0 && /Rolled back|Restarted/.test(e.text));
+  const actions = incident.timeline.filter((e) => e.kind === "action" && e.at >= t0 && /Rolled back|Restarted|Demo reset:/.test(e.text));
   const h = hover !== null ? pts[hover] : null;
   const current = pts.at(-1)!.v;
 
@@ -66,7 +66,7 @@ export function ErrorRateChart({ incident }: { incident: IncidentView }) {
         )}
         {actions.length > 0 && (
           <span className="absolute -bottom-4 font-mono text-[10px] text-span-tool" style={{ left: Math.max(0, x(actions.at(-1)!.at) - 20) }}>
-            {/Rolled back/.test(actions.at(-1)!.text) ? "rollback" : "restart"}
+            {/Demo reset:/.test(actions.at(-1)!.text) ? "demo reset" : /Rolled back/.test(actions.at(-1)!.text) ? "rollback" : "restart"}
           </span>
         )}
       </div>

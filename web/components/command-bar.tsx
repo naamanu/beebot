@@ -382,7 +382,7 @@ function describe(p: RoutePreview, template: Template, hasFiles: boolean, incide
   }
   const a = useTower.getState().agents.find((x) => x.id === p.target);
   const who = p.target === "all" ? "all agents" : a ? agentName(a) : `agent ${p.target}`;
-  const verb = { assign: "next task", stop: "stop / deny", correct: "correction", approve: "approve", rule: "rule", incident: "incident", chatter: "" }[p.intent];
+  const verb = { assign: "next task", stop: "stop / deny", correct: "correction", approve: "approve", rule: "rule", incident: "incident", report: "report back", chatter: "" }[p.intent];
   return `${who} · ${verb}`;
 }
 
@@ -432,7 +432,7 @@ function Confirmation() {
           {v.instruction ? `: ${v.instruction.slice(0, 90)}${v.instruction.length > 90 ? "…" : ""}` : ""}
         </span>
       )}
-      {v && <VoteDots votes={v.votes} />}
+      {v && <VoteDots votes={v.votes} requested={v.requestedVotes} agreement={v.confidence} />}
     </div>
   );
 }
@@ -448,13 +448,13 @@ function useNowTick(ms: number) {
 
 // The decision engine, visible: one block per router vote, filled when it
 // agreed with the winning reading.
-function VoteDots({ votes }: { votes: { count: number }[] }) {
-  const total = votes.reduce((n, v) => n + v.count, 0);
+function VoteDots({ votes, requested, agreement }: { votes: { count: number }[]; requested?: number; agreement: number }) {
   const agree = votes[0]?.count ?? 0;
+  const total = requested ?? (agreement > 0 ? Math.round(agree / agreement) : votes.reduce((n, v) => n + v.count, 0));
   return (
     <span
       className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[11px]"
-      title="Each instruction is read by several independent votes; the share that agree decides whether the tower acts or asks back"
+      title="Several votes from the same model route each instruction. By default, at least 3 of 5 must agree to act. Agreement is not a probability of correctness."
     >
       <span className="flex gap-0.5" aria-hidden>
         {Array.from({ length: total }, (_, i) => (

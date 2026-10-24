@@ -61,9 +61,34 @@ export type IncidentStatus = "investigating" | "identified" | "mitigated" | "res
 
 export interface TimelineEntry {
   at: number;
-  kind: "declared" | "status" | "finding" | "action" | "approval" | "statuspage" | "instruction";
+  kind: "declared" | "status" | "finding" | "recommendation" | "action" | "approval" | "statuspage" | "instruction";
   text: string;
   by: string;
+}
+
+export interface IncidentDecision {
+  action: "rollback" | "investigate";
+  deployId: string | null;
+  reason: string;
+  findingIds: number[]; // 1-based positions in the incident's recorded findings
+  missingEvidence: string[];
+}
+
+export interface IncidentRecommendation {
+  state: "none" | "reviewing" | "ready" | "error";
+  decision: IncidentDecision | null;
+  error: string | null;
+  costUsd: number;
+}
+
+export interface SkippedInvestigation {
+  at: number;
+  by: string;
+  reason: string;
+  openQuestions: string[];
+  recoveryConfirmed: boolean;
+  /** Explicit simulator reset; distinct from recovery established by investigators. */
+  demoRecoveryAt?: number;
 }
 
 export interface IncidentView {
@@ -82,10 +107,13 @@ export interface IncidentView {
   postmortemState: "none" | "writing" | "ready" | "error"; // written automatically on resolve
   jamieMeetingId: string | null;
   declaredBy: string; // "watchtower" when it declared itself
-  fixAppliedAt: number | null; // when the bad deploy was rolled back
+  fixAppliedAt: number | null; // rollback or simulated provider recovery
+  recommendation?: IncidentRecommendation;
+  skippedInvestigation?: SkippedInvestigation;
+  canSkipInvestigation?: boolean; // absent on older servers that cannot handle the command
 }
 
-export type Intent = "assign" | "stop" | "correct" | "approve" | "rule" | "incident" | "chatter";
+export type Intent = "assign" | "stop" | "correct" | "approve" | "rule" | "incident" | "report" | "chatter";
 
 export type IncidentAction = "declare" | "identified" | "mitigated" | "resolved" | "stand_down" | "none";
 
@@ -96,6 +124,7 @@ export interface RouteVerdict {
   instruction: string;
   incidentAction: IncidentAction; // only meaningful when intent is "incident"
   confidence: number; // share of requested votes agreeing with the winner
+  requestedVotes?: number; // optional for compatibility with saved decisions
   votes: { target: string; intent: Intent; count: number; incidentAction?: IncidentAction }[];
   action: "applied" | "clarify" | "ignored";
   ms: number;
@@ -148,7 +177,10 @@ export type ClientMsg =
   | { type: "incident_status"; status: IncidentStatus }
   | { type: "clear_rules" }
   | { type: "watch_toggle"; on: boolean }
-  | { type: "simulate_outage" }
+  | { type: "simulate_outage"; scenario?: "deploy" | "provider" }
+  | { type: "recover_provider" }
+  | { type: "retry_recommendation" }
+  | { type: "skip_investigation"; incidentId: string }
   | { type: "accept_proposal"; id: string }
   | { type: "dismiss_proposal"; id: string }
   | { type: "stand_down" };
@@ -328,8 +360,9 @@ export interface WatchView {
 export interface Proposal {
   id: string;
   source: "jamie" | "tower";
-  // tower: a fix it proposes itself when the investigators stopped short.
+  // tower: an evidence-based fix, always scoped to its incident.
   action?: { type: "rollback"; deployId: string };
+  incidentId?: string;
   title: string;
   items: string[];
   createdAt: number;
