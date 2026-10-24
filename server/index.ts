@@ -1,7 +1,8 @@
 import "dotenv/config";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { Agent, type AgentSnapshot } from "./agents.ts";
@@ -12,7 +13,7 @@ import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { Approval, ClientMsg, Decision, IncidentStatus, RouteVerdict, RunStatus, ServerMsg } from "./types.ts";
+import type { Approval, ClientMsg, Decision, IncidentStatus, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
 import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,6 +23,9 @@ const ROUTER_MODEL = process.env.ROUTER_MODEL || "claude-haiku-5-5";
 const ROUTER_VOTES = Number(process.env.ROUTER_VOTES || 5);
 
 const SESSION_FILE = join(ROOT, "data", "session.json");
+const UPLOADS = join(ROOT, "data", "uploads");
+const UNDO_MS = 4000; // a new agent can be cancelled for this long before it starts
+const MAX_UPLOAD = 50 * 1024 * 1024;
 const TEMPLATE = join(ROOT, "demo", "template");
 
 const rules = new RuleBook(join(ROOT, "data", "rules.json"));
@@ -74,8 +78,10 @@ function saveNow(): void {
   writeFileSync(SESSION_FILE, JSON.stringify(data));
 }
 
-function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapshot, role?: string): Agent {
+function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapshot, role?: string, template?: Template): Agent {
+  const t = template ?? restore?.template;
   return new Agent({
+    template: t === "general" ? "general" : "coding",
     incident: incident && role ? { incident, role } : undefined,
     onApproval: (agent, approval) => onApproval(agent, approval),
     id,
@@ -87,8 +93,8 @@ function makeAgent(id: string, task: string, cwd: string, restore?: AgentSnapsho
     workspace: run?.dir ?? "",
     rules: () => rules.asPrompt(),
     onEvent: (agentId, event, status) => {
-      const runId = agents.find((a) => a.id === agentId)?.runId ?? null;
-      broadcast({ type: "agent_event", id: agentId, event, status, runId });
+      const agent = agents.find((a) => a.id === agentId);
+      broadcast({ type: "agent_event", id: agentId, event, status, runId: agent?.runId ?? null, costUsd: agent?.costUsd ?? 0 });
       save();
     },
   });
@@ -135,18 +141,67 @@ function startSession(tasks: string[]): void {
   broadcast({ type: "notice", level: "info", text: `Started ${agents.length} agents in ${run!.dir}` });
 }
 
-// A new agent in its own worktree. Creates the session workspace on first use,
-// so you can start from nothing and assign every task by voice.
-function spawnAgent(task: string, { quiet = false } = {}): Agent {
+interface AttachedFile extends Upload {
+  path: string;
+}
+
+function resolveUploads(ids: string[] = []): AttachedFile[] {
+  return ids.flatMap((id) => {
+    if (!/^[\w-]+$/.test(id)) return [];
+    const dir = join(UPLOADS, id);
+    if (!existsSync(dir)) return [];
+    const name = readdirSync(dir)[0];
+    if (!name) return [];
+    return [{ id, name, size: statSync(join(dir, name)).size, path: join(dir, name) }];
+  });
+}
+
+// Copy attachments into an agent's workspace and describe them for its prompt.
+function attach(files: AttachedFile[], cwd: string, folder: string): string {
+  if (!files.length) return "";
+  mkdirSync(join(cwd, folder), { recursive: true });
+  for (const f of files) copyFileSync(f.path, join(cwd, folder, f.name));
+  return `\n\nAttached files:\n${files.map((f) => `- ${folder}/${f.name} (${formatBytes(f.size)})`).join("\n")}`;
+}
+
+function formatBytes(n: number): string {
+  return n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`;
+}
+
+// A new agent. Creates the session workspace on first use, so you can start
+// from nothing. Coding agents get a git worktree; general agents a folder
+// with inputs/ and outputs/. With undo, it waits UNDO_MS before starting.
+function spawnAgent(
+  task: string,
+  { quiet = false, template = "coding" as Exclude<Template, "incident">, files = [] as AttachedFile[], undo = false } = {},
+): Agent {
   run ??= createRun(ROOT, TEMPLATE);
   const id = String(agents.reduce((max, a) => Math.max(max, Number(a.id)), 0) + 1);
-  const agent = makeAgent(id, task, addWorktree(run, id));
+  const cwd = template === "general" ? addScratchDir(run, id) : addWorktree(run, id);
+  if (template === "general") mkdirSync(join(cwd, "outputs"), { recursive: true });
+  const fullTask = task + attach(files, cwd, template === "general" ? "inputs" : "attachments");
+  const agent = makeAgent(id, fullTask, cwd, undefined, undefined, template);
   agents.push(agent);
-  agent.begin();
+  if (undo) {
+    agent.beginAfter(UNDO_MS, () => {
+      broadcast(state());
+      save();
+    });
+  } else agent.begin();
   broadcast(state());
   save();
-  if (!quiet) broadcast({ type: "notice", level: "info", text: `Agent ${id} is on it: ${task}` });
+  if (!quiet) broadcast({ type: "notice", level: "info", text: `Agent ${id} ${undo ? "starts in a moment" : "is on it"}: ${task}` });
   return agent;
+}
+
+function cancelStart(id: string): void {
+  const agent = agents.find((a) => a.id === id);
+  if (!agent?.cancelStart()) return;
+  agent.close("reset");
+  agents = agents.filter((a) => a !== agent);
+  broadcast(state());
+  broadcast({ type: "notice", level: "info", text: `Cancelled agent ${id} before it started.` });
+  save();
 }
 
 // --- Incidents ---
@@ -214,13 +269,18 @@ function agentLabel(a: Agent): string {
   return role ? `${role} (agent ${a.id})` : `agent ${a.id}`;
 }
 
-function hear(utterance: string, focused: string | null): void {
-  routing = routing.then(() => routeAndApply(utterance, focused)).catch((err) => {
+interface HearOptions {
+  template?: Template;
+  files?: AttachedFile[];
+}
+
+function hear(utterance: string, focused: string | null, opts: HearOptions = {}): void {
+  routing = routing.then(() => routeAndApply(utterance, focused, opts)).catch((err) => {
     broadcast({ type: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
   });
 }
 
-async function routeAndApply(utterance: string, focused: string | null): Promise<void> {
+async function routeAndApply(utterance: string, focused: string | null, opts: HearOptions): Promise<void> {
   broadcast({ type: "routing", utterance });
   const verdict = await router.route(utterance, {
     agents: agents.map((a) => a.view()),
@@ -229,6 +289,7 @@ async function routeAndApply(utterance: string, focused: string | null): Promise
     pendingClarification,
     focused,
     incident: incident?.view() ?? null,
+    attachments: opts.files?.map((f) => f.name),
   });
   recent.push(utterance);
   telemetry.recordDecision(verdict);
@@ -246,7 +307,7 @@ async function routeAndApply(utterance: string, focused: string | null): Promise
   if (verdict.action === "applied") pendingClarification = null;
   remember({ verdict });
   broadcast({ type: "verdict", verdict });
-  if (verdict.action === "applied") await apply(verdict);
+  if (verdict.action === "applied") await apply(verdict, opts);
 }
 
 function remember(d: Decision): void {
@@ -254,7 +315,7 @@ function remember(d: Decision): void {
   save();
 }
 
-async function apply(v: RouteVerdict): Promise<void> {
+async function apply(v: RouteVerdict, opts: HearOptions = {}): Promise<void> {
   if (v.intent === "incident") {
     if (v.incidentAction === "declare") declareIncident(v.instruction || "Production incident");
     else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
@@ -281,8 +342,19 @@ async function apply(v: RouteVerdict): Promise<void> {
     return;
   }
   if (v.intent === "assign" && (v.target === "new" || agents.length === 0)) {
-    spawnAgent(v.instruction).traceRouter(v);
+    // With the Incident chip selected and no incident yet, new work starts one.
+    if (opts.template === "incident" && !incident) {
+      declareIncident(v.instruction);
+      return;
+    }
+    const template = opts.template === "general" || opts.files?.length ? "general" : "coding";
+    spawnAgent(v.instruction, { template, files: opts.files, undo: true }).traceRouter(v);
     return;
+  }
+  // Files attached to an instruction for an existing agent go into its workspace.
+  if (opts.files?.length && v.target !== "all") {
+    const target = agents.find((a) => a.id === v.target);
+    if (target) v = { ...v, instruction: v.instruction + attach(opts.files, target.cwd, target.template === "general" ? "inputs" : "attachments") };
   }
   const targets = v.target === "all" ? agents : agents.filter((a) => a.id === v.target);
   for (const a of targets) {
@@ -331,6 +403,10 @@ const http = createServer((req, res) => {
     res.end(JSON.stringify(body));
   };
   const fail = (err: unknown) => json(500, { error: err instanceof Error ? err.message : String(err) });
+  if (url.pathname === "/api/uploads" || url.pathname === "/api/preview" || url.pathname.startsWith("/api/agents/")) {
+    void workApi(req, res, url, json).catch(fail);
+    return;
+  }
   if (url.pathname.startsWith("/api/incident") || url.pathname.startsWith("/api/jamie") || url.pathname.startsWith("/webhooks/")) {
     void incidentApi(req, url, json).catch(fail);
     return;
@@ -381,7 +457,7 @@ wss.on("connection", (ws) => {
         }
         break;
       case "say":
-        if (msg.text.trim()) hear(msg.text.trim(), focused);
+        if (msg.text.trim()) hear(msg.text.trim(), focused, { template: msg.template, files: resolveUploads(msg.attachments) });
         break;
       case "mic":
         if (msg.on && !mic) {
@@ -421,6 +497,9 @@ wss.on("connection", (ws) => {
       case "reset":
         resetSession();
         break;
+      case "cancel_start":
+        cancelStart(msg.id);
+        break;
       case "approval": {
         const agent = agents.find((a) => a.approval?.id === msg.id);
         if (agent) decideApproval(agent, msg.decision, "commander");
@@ -449,6 +528,80 @@ async function readBody(req: import("node:http").IncomingMessage): Promise<strin
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".md": "text/markdown; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".json": "application/json",
+  ".html": "text/html; charset=utf-8",
+  ".pdf": "application/pdf",
+};
+
+// Uploads, agent outputs, and the command bar's routing preview.
+async function workApi(
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  url: URL,
+  json: (status: number, body: unknown) => void,
+): Promise<void> {
+  if (url.pathname === "/api/uploads" && req.method === "POST") {
+    const name = basename(url.searchParams.get("name") || "file").replace(/[^\w.\- ]/g, "_");
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > MAX_UPLOAD) return json(413, { error: "File is larger than 50 MB" });
+      chunks.push(c as Buffer);
+    }
+    const id = randomUUID();
+    mkdirSync(join(UPLOADS, id), { recursive: true });
+    writeFileSync(join(UPLOADS, id, name), Buffer.concat(chunks));
+    const upload: Upload = { id, name, size };
+    return json(200, upload);
+  }
+  if (url.pathname === "/api/preview" && req.method === "POST") {
+    const { text, attachments } = JSON.parse(await readBody(req)) as { text: string; attachments?: string[] };
+    const v = await router.preview(text, {
+      agents: agents.map((a) => a.view()),
+      rules: rules.list(),
+      recent: recent.slice(-4),
+      pendingClarification,
+      incident: incident?.view() ?? null,
+      attachments,
+    });
+    return json(200, { target: v.target, intent: v.intent, incidentAction: v.incidentAction, instruction: v.instruction });
+  }
+  const m = url.pathname.match(/^\/api\/agents\/(\d+)\/outputs(?:\/(.+))?$/);
+  const agent = m && agents.find((a) => a.id === m[1]);
+  if (!m || !agent) return json(404, { error: "not found" });
+  const dir = join(agent.cwd, "outputs");
+  if (!m[2]) {
+    const files: OutputFile[] = existsSync(dir)
+      ? readdirSync(dir)
+          .filter((n) => !n.startsWith("."))
+          .map((n) => ({ name: n, ...statOf(join(dir, n)) }))
+          .filter((f) => f.isFile)
+          .map(({ name, size, modifiedAt }) => ({ name, size, modifiedAt }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      : [];
+    return json(200, files);
+  }
+  const file = join(dir, basename(decodeURIComponent(m[2]))); // basename: no escaping the folder
+  if (!existsSync(file)) return json(404, { error: "no such output" });
+  res.writeHead(200, { "content-type": CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" });
+  createReadStream(file).pipe(res);
+}
+
+function statOf(path: string) {
+  const st = statSync(path);
+  return { size: st.size, modifiedAt: st.mtimeMs, isFile: st.isFile() };
 }
 
 // Incident endpoints: postmortem, Jamie call notes, and Jamie's webhook.

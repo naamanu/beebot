@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { MCP_NAME, RISKY_TOOLS, SAFE_TOOLS, incidentPrompt, type Incident } from "./incident/incident.ts";
 import type { Telemetry } from "./telemetry.ts";
 import { RunTracer } from "./tracer.ts";
-import type { AgentEvent, AgentStatus, AgentView, Approval, RouteVerdict } from "./types.ts";
+import type { AgentEvent, AgentStatus, AgentView, Approval, RouteVerdict, Template } from "./types.ts";
 
 // An async iterable we can keep pushing user messages into. The Agent SDK's
 // streaming input mode reads from it for the whole session, which is what lets
@@ -57,6 +57,7 @@ export interface AgentOptions {
   telemetry: Telemetry;
   workspace: string;
   restore?: AgentSnapshot;
+  template?: Exclude<Template, "incident">; // default "coding"
   // Incident agents use the shopfront tools instead of a code checkout.
   incident?: { incident: Incident; role: string };
   onApproval?: (agent: Agent, approval: Approval | null) => void;
@@ -72,7 +73,7 @@ export interface AgentSnapshot {
   costUsd: number;
   sessionId: string | null;
   runId?: string | null;
-  template?: "coding" | "incident";
+  template?: Template;
 }
 
 export class Agent {
@@ -114,6 +115,35 @@ export class Agent {
     return this.task_;
   }
 
+  get template(): Template {
+    return this.opts.incident ? "incident" : (this.opts.template ?? "coding");
+  }
+
+  get cwd(): string {
+    return this.opts.cwd;
+  }
+
+  // A new agent waits out a short undo window before it starts spending.
+  startsAt: number | null = null;
+  private startTimer: ReturnType<typeof setTimeout> | undefined;
+
+  beginAfter(ms: number, onStart: () => void): void {
+    this.startsAt = Date.now() + ms;
+    this.startTimer = setTimeout(() => {
+      this.startsAt = null;
+      this.begin();
+      onStart();
+    }, ms);
+  }
+
+  // Undo before it started: nothing ran, nothing was spent.
+  cancelStart(): boolean {
+    if (this.startsAt === null) return false;
+    clearTimeout(this.startTimer);
+    this.startsAt = null;
+    return true;
+  }
+
   get runId(): string | null {
     return this.tracer.runId;
   }
@@ -126,9 +156,10 @@ export class Agent {
       events: this.events.slice(-200),
       costUsd: this.costUsd,
       runId: this.tracer.runId,
-      template: this.opts.incident ? "incident" : "coding",
+      template: this.template,
       role: this.opts.incident?.role ?? null,
       approval: this.pending?.approval ?? null,
+      startsAt: this.startsAt,
     };
   }
 
@@ -142,7 +173,7 @@ export class Agent {
       costUsd: this.costUsd,
       sessionId: this.sessionId,
       runId: this.tracer.runId,
-      template: this.opts.incident ? "incident" : "coding",
+      template: this.template,
     };
   }
 
@@ -180,6 +211,26 @@ export class Agent {
         allowedTools: SAFE_TOOLS,
         canUseTool: (toolName, input, { signal }) => this.checkTool(toolName, input, signal),
         systemPrompt: incidentPrompt(inc.role) + this.opts.rules(),
+      };
+    }
+    if (this.template === "general") {
+      return {
+        ...common,
+        permissionMode: "acceptEdits",
+        allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          append:
+            `You are agent ${this.id}, a general-purpose agent supervised live by a human operator who speaks instructions; ` +
+            `messages starting with [Operator] are from them and take priority. Work only inside your current directory. ` +
+            `Files the operator attached are in ./inputs. Put every deliverable in ./outputs: a report as outputs/report.md ` +
+            `(lead with the answer), charts as PNG or SVG, tables as CSV. The operator sees ./outputs, not your scratch files. ` +
+            `For data work, Python packages are not installed system-wide: run scripts with ` +
+            `\`uv run --with pandas --with matplotlib script.py\` (add other packages the same way). ` +
+            `Keep progress notes to one short sentence, and finish with a two-sentence summary of what you found.` +
+            this.opts.rules(),
+        },
       };
     }
     return {
@@ -294,6 +345,7 @@ export class Agent {
   // reset: the user stopped everything. shutdown: the server is restarting
   // and the run will be resumed, so leave it open.
   close(reason: "reset" | "shutdown" = "shutdown"): void {
+    clearTimeout(this.startTimer);
     if (this.pending) this.decide("deny", "system", "agent closed");
     if (reason === "reset") this.tracer.abandon("stopped");
     this.inbox.close();

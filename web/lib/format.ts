@@ -21,3 +21,9 @@ export function formatAgo(at: number, now = Date.now()): string {
 export function formatPercent(x: number): string {
   return `${Math.round(x * 100)}%`;
 }
+
+export function formatBytesShort(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(n < 10_240 ? 1 : 0)} KB`;
+  return `${(n / 1024 ** 2).toFixed(1)} MB`;
+}

@@ -19,6 +19,20 @@ mic → Reson8 (turns STT) → router: N parallel Haiku votes → act / ask / ig
 - **Focus view:** open any agent to see its full history and message it directly. Voice commands that don't name an agent go to the open one, and the others keep working in the side strip. Press Esc to go back to the grid.
 - **Survives restarts:** the session is saved to `data/session.json`. On restart, every agent is restored and any agent that was mid-task resumes its Claude session.
 
+## Starting work: the command bar
+
+Everything starts in one place at the bottom of the Tower: type, or hold **Space** and talk into it (**⌘K** focuses it from anywhere).
+
+- **Kinds of work:**
+  - **General:** analysis, research and writing. Attach files by dropping, pasting or using the paperclip; they land in the agent's `inputs/`. Deliverables (a `report.md`, charts, CSVs) go to `outputs/` and show in the agent's **Outputs** panel. Data work runs with `uv run --with pandas …`, so nothing is installed system-wide.
+  - **Code:** a new agent in its own git worktree of the demo repo.
+  - **Incident:** declares an incident (see below).
+
+  The selected kind only applies to *new* work. "Two, stop" still goes to agent 2.
+- **Preview:** when you pause typing, one quick router vote shows where the instruction will go ("→ new General agent with the attached files", "→ agent 2 · stop"). Enter runs the full five-vote decision.
+- **Undo:** a new agent waits 4 seconds before it starts, with an Undo button.
+- **More:** the ⋯ menu has the four demo coding tasks, clearing standing rules, and resetting the board.
+
 ## Incident response
 
 Say "declare an incident: checkout is failing" (or click **Declare incident**). Four investigators start on a simulated Shopfront outage:

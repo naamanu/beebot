@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import { invalidateTelemetry } from "./api.ts";
-import type { AgentView, ClientMsg, IncidentView, RouteVerdict, ServerMsg } from "../../server/types.ts";
+import type { AgentView, ClientMsg, IncidentView, RouteVerdict, ServerMsg, Template, Upload } from "../../server/types.ts";
 
 export interface FeedItem {
   id: number;
@@ -9,6 +9,13 @@ export interface FeedItem {
   utterance: string;
   verdict?: RouteVerdict;
   question?: string;
+}
+
+// What the command bar is composing.
+export interface Draft {
+  text: string;
+  template: Template;
+  attachments: (Upload & { uploading?: boolean })[];
 }
 
 interface TowerState {
@@ -21,6 +28,8 @@ interface TowerState {
   levels: number[]; // recent mic levels, newest last
   steeredAt: Record<string, number>;
   focused: string | null; // agent opened full-screen
+  draft: Draft;
+  setDraft: (patch: Partial<Draft>) => void;
   setFocus: (id: string | null) => void;
   send: (msg: ClientMsg) => void;
   sendAudio: (pcm: ArrayBuffer) => void;
@@ -41,6 +50,8 @@ export const useTower = create<TowerState>()((set, get) => ({
   levels: [],
   steeredAt: {},
   focused: null,
+  draft: { text: "", template: "general", attachments: [] },
+  setDraft: (patch) => set({ draft: { ...get().draft, ...patch } }),
   setFocus: (id) => {
     set({ focused: id });
     get().send({ type: "focus", id });
@@ -73,7 +84,7 @@ function handle(m: ServerMsg): void {
     case "agent_event":
       set((s) => ({
         agents: s.agents.map((a) =>
-          a.id === m.id ? { ...a, status: m.status, runId: m.runId, events: [...a.events, m.event].slice(-200) } : a,
+          a.id === m.id ? { ...a, status: m.status, runId: m.runId, costUsd: m.costUsd, events: [...a.events, m.event].slice(-200) } : a,
         ),
         steeredAt: m.event.kind === "steer" ? { ...s.steeredAt, [m.id]: Date.now() } : s.steeredAt,
       }));

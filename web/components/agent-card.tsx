@@ -4,6 +4,7 @@ import { Maximize2, Waypoints } from "lucide-react";
 import type { AgentEvent, AgentView } from "../../server/types.ts";
 import { Button } from "@/components/ui/button";
 import { ApprovalCard } from "@/components/incident/approval-card";
+import { OutputChips } from "@/components/outputs-panel";
 import { Card } from "@/components/ui/card";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Dot, Pill } from "@/components/pill";
@@ -67,9 +68,30 @@ export function AgentCard({ agent }: { agent: AgentView }) {
         </div>
         <p className="line-clamp-2 text-[13px] leading-snug text-muted-foreground">{agent.task}</p>
         {agent.approval && <ApprovalCard approval={agent.approval} compact />}
+        <OutputChips agent={agent} onOpen={() => setFocus(agent.id)} />
       </div>
+      {agent.startsAt && <StartingOverlay agent={agent} />}
       <SpanList events={agent.events} />
     </Card>
+  );
+}
+
+// The undo window before a new agent starts spending.
+function StartingOverlay({ agent }: { agent: AgentView }) {
+  const send = useTower((s) => s.send);
+  const now = useNow(250);
+  const left = Math.max(0, Math.ceil((agent.startsAt! - now) / 1000));
+  return (
+    <div className="absolute inset-0 z-10 grid place-items-center rounded-xl bg-card/85 backdrop-blur-[1px]">
+      <div className="flex flex-col items-center gap-2 text-center">
+        <p className="text-sm">
+          Starting in <span className="font-mono tabular-nums">{left}s</span>
+        </p>
+        <Button size="sm" variant="outline" onClick={() => send({ type: "cancel_start", id: agent.id })}>
+          Undo
+        </Button>
+      </div>
+    </div>
   );
 }
 

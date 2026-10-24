@@ -17,9 +17,33 @@ export interface AgentView {
   events: AgentEvent[];
   costUsd: number;
   runId: string | null; // the run in progress, for linking to its trace
-  template: "coding" | "incident";
+  template: Template;
   role: string | null; // incident role, e.g. "Logs"
+  startsAt: number | null; // set while a new agent waits out its undo window
   approval: Approval | null; // a risky action waiting for a human
+}
+
+// What kind of work an agent does. "general" works on attached files and
+// writes deliverables to outputs/; "coding" works in a git worktree.
+export type Template = "general" | "coding" | "incident";
+
+export interface Upload {
+  id: string;
+  name: string;
+  size: number;
+}
+
+export interface OutputFile {
+  name: string;
+  size: number;
+  modifiedAt: number;
+}
+
+export interface RoutePreview {
+  target: string;
+  intent: Intent;
+  incidentAction: IncidentAction;
+  instruction: string;
 }
 
 export interface Approval {
@@ -80,7 +104,7 @@ export interface Decision {
 
 export type ServerMsg =
   | { type: "state"; agents: AgentView[]; rules: string[]; decisions: Decision[]; incident: IncidentView | null }
-  | { type: "agent_event"; id: string; event: AgentEvent; status: AgentStatus; runId: string | null }
+  | { type: "agent_event"; id: string; event: AgentEvent; status: AgentStatus; runId: string | null; costUsd: number }
   | { type: "transcript"; text: string; final: boolean }
   | { type: "routing"; utterance: string }
   | { type: "verdict"; verdict: RouteVerdict }
@@ -91,7 +115,8 @@ export type ServerMsg =
 
 export type ClientMsg =
   | { type: "start"; tasks: string[] }
-  | { type: "say"; text: string }
+  | { type: "say"; text: string; template?: Template; attachments?: string[] } // attachments: upload ids
+  | { type: "cancel_start"; id: string }
   | { type: "mic"; on: boolean }
   | { type: "reset" }
   | { type: "focus"; id: string | null }

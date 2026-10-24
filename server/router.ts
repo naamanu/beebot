@@ -18,6 +18,7 @@ export interface RouterContext {
   pendingClarification: { utterance: string; question: string } | null;
   focused?: string | null; // agent the operator has open in the UI
   incident?: IncidentView | null;
+  attachments?: string[]; // names of files attached to this instruction
 }
 
 export class Router {
@@ -32,7 +33,12 @@ export class Router {
     private ignoreThreshold = 0.8,
   ) {}
 
-  async route(utterance: string, ctx: RouterContext): Promise<RouteVerdict> {
+  // One quick vote: what the command bar shows while you type.
+  async preview(utterance: string, ctx: RouterContext): Promise<RouteVerdict> {
+    return this.route(utterance, ctx, 1);
+  }
+
+  async route(utterance: string, ctx: RouterContext, votes = this.votes): Promise<RouteVerdict> {
     const started = Date.now();
     const targets: [string, ...string[]] = ["new", "all", "none", "unclear", ...ctx.agents.map((a) => a.id)];
     const schema = z.object({
@@ -46,7 +52,7 @@ export class Router {
 
     const prompt = buildPrompt(utterance, ctx);
     const results = await Promise.allSettled(
-      Array.from({ length: this.votes }, () =>
+      Array.from({ length: votes }, () =>
         this.client.messages.parse({
           model: this.model,
           max_tokens: 1024,
@@ -165,12 +171,16 @@ function buildPrompt(utterance: string, ctx: RouterContext): string {
     })
     .join("\n\n");
 
-  return `You route a human operator's spoken words to the coding agents they are supervising. The text comes from live speech-to-text, so expect transcription errors ("to" may be agent "two", "for" may be "four", "won" may be "one").
+  return `You route a human operator's spoken words to the coding agents they are supervising. The text comes from live speech-to-text or a typed command bar, so expect transcription errors ("to" may be agent "two", "for" may be "four", "won" may be "one").
 
 <agents>
 ${agents || "(no agents yet: anything that sounds like work to do is an assign to a new agent)"}
 </agents>
-${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}
+${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An instruction that names no agent is for agent ${ctx.focused}.\n` : ""}${approvalsBlock(ctx.agents)}${incidentBlock(ctx.incident)}${
+  ctx.attachments?.length
+    ? `\nThe operator attached files to this instruction: ${ctx.attachments.join(", ")}. Starting work on them is an assign (target "new" unless they name an agent).\n`
+    : ""
+}
 <standing_rules>
 ${ctx.rules.length ? ctx.rules.map((r) => `- ${r}`).join("\n") : "(none)"}
 </standing_rules>

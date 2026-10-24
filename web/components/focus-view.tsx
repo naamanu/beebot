@@ -41,9 +41,9 @@ export function FocusView({ agent }: { agent: AgentView }) {
       className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10"
     >
       <header className="flex flex-col gap-3 border-b border-border px-5 py-4">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <span className="grid size-8 place-items-center rounded-md bg-secondary font-heading">{agent.id}</span>
-          <h2 className="font-mono text-base font-medium">
+          <h2 className="font-mono text-base font-medium whitespace-nowrap">
             agent-{agent.id}
             {agent.role && <span className="ml-2 font-sans font-semibold">{agent.role}</span>}
           </h2>

@@ -6,3 +6,4 @@ data/rules.json
 data/session.json
 data/telemetry.db*
 data/postmortems/
+data/uploads/

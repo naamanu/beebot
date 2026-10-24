@@ -7,9 +7,11 @@ import { AgentStrip } from "@/components/agent-strip";
 import { DecisionFeed } from "@/components/decision-feed";
 import { EmptyState } from "@/components/empty-state";
 import { FocusView } from "@/components/focus-view";
-import { HeardPanel } from "@/components/heard-panel";
 import { RulesPanel } from "@/components/rules-panel";
 import { TopBar } from "@/components/top-bar";
+import { CommandBar, attachFiles } from "@/components/command-bar";
+import { OutputsPanel } from "@/components/outputs-panel";
+import { useState } from "react";
 import { useMic } from "@/hooks/use-mic";
 import { useRoute } from "@/hooks/use-route";
 import { queryClient } from "@/lib/api";
@@ -50,6 +52,7 @@ export function App() {
   const agents = useTower((s) => s.agents);
   const focused = useTower((s) => s.focused);
   const incident = useTower((s) => s.incident);
+  const [dragging, setDragging] = useState(false);
   const mic = useMic();
   const route = useRoute();
 
@@ -61,7 +64,7 @@ export function App() {
     <QueryClientProvider client={queryClient}>
     <TooltipProvider delayDuration={200}>
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
-        <TopBar micOn={mic.on} onToggleMic={mic.toggle} />
+        <TopBar />
         {route.page !== "tower" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 lg:overflow-hidden">
             {route.page === "run" ? <RunDetail key={route.id} id={route.id} /> : route.page === "postmortem" ? <PostmortemPage /> : <RunsPage />}
@@ -69,33 +72,50 @@ export function App() {
         ) : (
         /* Below lg the page scrolls; from lg up everything fits the viewport. */
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 lg:flex-row lg:overflow-hidden">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+          <div
+            className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-3"
+            onDragOver={(e) => {
+              if (!e.dataTransfer.types.includes("Files")) return;
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={(e) => e.currentTarget === e.target && setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              if (e.dataTransfer.files.length) attachFiles(e.dataTransfer.files, useTower.getState().setDraft);
+            }}
+          >
+          {dragging && (
+            <div className="pointer-events-none absolute inset-0 z-30 grid place-items-center rounded-xl border-2 border-dashed border-foreground/30 bg-background/80">
+              <p className="font-heading text-xl">Drop files to attach them</p>
+            </div>
+          )}
           {incident && <IncidentBar incident={incident} />}
           <main className="flex min-h-0 min-w-0 flex-1 gap-3">
             {open ? (
               <>
                 <FocusView agent={open} />
-                {agents.length > 1 && <AgentStrip agents={agents.filter((a) => a.id !== open.id)} />}
+                {open.template === "general" && <OutputsPanel agent={open} />}
+                {agents.length > 1 && <AgentStrip agents={agents.filter((a) => a.id !== open.id)} compact={open.template === "general"} />}
               </>
             ) : agents.length === 0 ? (
-              <div className="flex flex-1 rounded-xl bg-card ring-1 ring-foreground/10">
-                <EmptyState />
-              </div>
+              <EmptyState />
             ) : (
               <AgentGrid agents={agents} />
             )}
           </main>
+          <CommandBar micOn={mic.on} onToggleMic={mic.toggle} />
           </div>
           <aside className="flex min-h-[560px] shrink-0 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:min-h-0 lg:w-[360px]">
             <ApprovalsPanel />
-            <HeardPanel micOn={mic.on} />
             <DecisionFeed />
             {incident ? <FindingsPanel incident={incident} /> : <RulesPanel />}
           </aside>
         </div>
         )}
       </div>
-      <Toaster position="bottom-left" />
+      <Toaster position="top-center" />
     </TooltipProvider>
     </QueryClientProvider>
   );
