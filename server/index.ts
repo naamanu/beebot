@@ -407,6 +407,7 @@ function declareIncident(title: string, { by = "commander", anomaly = null as An
   incidentTimer = setInterval(() => {
     broadcastIncident();
     maybeBrief();
+    maybeProposeFix();
   }, 2000);
   broadcast(state());
   broadcast({ type: "speak", text: anomaly ? anomalyBriefing(anomaly) : `Incident declared: ${title}. Four investigators are on it.` });
@@ -437,6 +438,15 @@ function acceptProposal(id: string | null): void {
   const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
   if (!p) return;
   p.status = "accepted";
+  if (p.action?.type === "rollback") {
+    const result = production.rollback(p.action.deployId);
+    incident?.log("approval", `Approved: roll back deploy #${p.action.deployId}`, "commander");
+    incident?.log("action", result, "tower");
+    broadcast(state());
+    broadcast({ type: "speak", text: `Rolling back deploy ${p.action.deployId}. I'll tell you when errors are back to normal.` });
+    save();
+    return;
+  }
   // Code-shaped items get a coding agent; the rest a general one.
   for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true });
   broadcast(state());
@@ -452,6 +462,31 @@ function dismissProposal(id: string | null): void {
   save();
 }
 
+// Write the postmortem from the timeline, the agents' runs and any call
+// notes. Runs on resolve by itself; the Postmortem tab can also redo it.
+async function generatePostmortem(current: Incident): Promise<string> {
+  current.postmortemState = "writing";
+  broadcastIncident();
+  try {
+    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= current.declaredAt - 5000);
+    const markdown = await writePostmortem(current, runs, callNotes);
+    if (incident !== current) throw new HttpError(409, "The incident changed while the postmortem was being generated.");
+    current.postmortem = markdown;
+    current.postmortemState = "ready";
+    // Incidents live in memory; keep the write-up and its source timeline on disk.
+    const dir = join(DATA, "postmortems");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${current.id}.md`), markdown);
+    writeJsonAtomic(join(dir, `${current.id}.timeline.json`), current.view());
+    return markdown;
+  } catch (err) {
+    current.postmortemState = current.postmortem ? "ready" : "error";
+    throw err;
+  } finally {
+    broadcastIncident();
+  }
+}
+
 // Called off as a false alarm: stop the investigators and close it.
 function standDown(by: string): void {
   if (!incident || incident.status === "resolved") return;
@@ -460,6 +495,33 @@ function standDown(by: string): void {
   setIncidentStatus("resolved", by);
   watchtower.disarm();
   broadcast({ type: "speak", text: "Standing down. I'll keep watching production." });
+}
+
+// The investigators finished but nothing fixed it: the tower proposes the
+// rollback of the suspect deploy itself, once, and waits for a yes.
+function maybeProposeFix(): void {
+  if (!incident || incident.status === "resolved" || !production.broken) return;
+  const suspect = production.badDeploy!;
+  const investigators = agents.filter((a) => a.template === "incident");
+  const busy = investigators.some((a) => a.status === "working" || a.status === "starting" || a.status === "blocked" || a.approval);
+  if (!investigators.length || busy) return;
+  if (proposals.some((p) => p.action?.type === "rollback" && p.action.deployId === suspect.id && p.status !== "dismissed")) return;
+  const proposal: Proposal = {
+    id: randomUUID().slice(0, 8),
+    source: "tower",
+    title: `Roll back deploy #${suspect.id}?`,
+    items: [`Roll back deploy #${suspect.id} to ${suspect.service} (“${suspect.message}”, by ${suspect.author})`],
+    createdAt: Date.now(),
+    status: "open",
+    action: { type: "rollback", deployId: suspect.id },
+  };
+  proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
+  incident.log("approval", `Proposed: roll back deploy #${suspect.id}`, "tower");
+  broadcast(state());
+  broadcast({
+    type: "speak",
+    text: `All ${investigators.length} investigators have finished, and the most likely cause is deploy ${suspect.id} to ${suspect.service}. Roll it back? Say “approve”.`,
+  });
 }
 
 // A spoken update during an incident, at most every 45 seconds and only
@@ -485,7 +547,12 @@ function setIncidentStatus(status: IncidentStatus, by: string): void {
   incident.setStatus(status, by);
   if (status === "resolved") {
     clearInterval(incidentTimer);
-    if (wasOpen && !/Stood down/.test(incident.timeline.at(-2)?.text ?? "")) broadcast({ type: "speak", text: closingBriefing(incident.view()) });
+    const stoodDown = /Stood down/.test(incident.timeline.at(-2)?.text ?? "");
+    if (wasOpen && !stoodDown) {
+      broadcast({ type: "speak", text: closingBriefing(incident.view()) });
+      // The postmortem writes itself; a false alarm doesn't get one.
+      void generatePostmortem(incident).catch((err) => console.warn(`Postmortem failed: ${(err as Error).message}`));
+    }
   }
   broadcastIncident();
 }
@@ -892,6 +959,9 @@ wss.on("connection", (ws) => {
           broadcast({ type: "notice", level: "info", text: `Simulated: deploy #${badDeployId} just landed on payments-api.` });
         }
         break;
+      case "stand_down":
+        standDown("commander");
+        break;
       case "accept_proposal":
         acceptProposal(msg.id);
         break;
@@ -1049,18 +1119,8 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
     return json(200, { markdown: incident.postmortem });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "POST") {
-    const current = incident;
-    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= current.declaredAt - 5000);
-    const markdown = await writePostmortem(current, runs, callNotes);
-    if (incident !== current) throw new HttpError(409, "The incident changed while the postmortem was being generated.");
-    current.postmortem = markdown;
-    // Incidents live in memory; keep the write-up and its source timeline on disk.
-    const dir = join(DATA, "postmortems");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${current.id}.md`), markdown);
-    writeJsonAtomic(join(dir, `${current.id}.timeline.json`), current.view());
-    broadcastIncident();
-    return json(200, { markdown: incident.postmortem });
+    const markdown = await generatePostmortem(incident);
+    return json(200, { markdown });
   }
   json(404, { error: "not found" });
 }

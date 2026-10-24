@@ -79,7 +79,10 @@ export interface IncidentView {
   timeline: TimelineEntry[];
   statusPosts: { at: number; status: string; message: string }[];
   hasPostmortem: boolean;
+  postmortemState: "none" | "writing" | "ready" | "error"; // written automatically on resolve
   jamieMeetingId: string | null;
+  declaredBy: string; // "watchtower" when it declared itself
+  fixAppliedAt: number | null; // when the bad deploy was rolled back
 }
 
 export type Intent = "assign" | "stop" | "correct" | "approve" | "rule" | "incident" | "chatter";
@@ -147,7 +150,8 @@ export type ClientMsg =
   | { type: "watch_toggle"; on: boolean }
   | { type: "simulate_outage" }
   | { type: "accept_proposal"; id: string }
-  | { type: "dismiss_proposal"; id: string };
+  | { type: "dismiss_proposal"; id: string }
+  | { type: "stand_down" };
 
 // --- Telemetry ---
 
@@ -321,7 +325,9 @@ export interface WatchView {
 // Work the tower suggests on its own, e.g. action items from a review call.
 export interface Proposal {
   id: string;
-  source: "jamie";
+  source: "jamie" | "tower";
+  // tower: a fix it proposes itself when the investigators stopped short.
+  action?: { type: "rollback"; deployId: string };
   title: string;
   items: string[];
   createdAt: number;

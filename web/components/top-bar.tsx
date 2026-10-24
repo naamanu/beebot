@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -32,13 +33,17 @@ export function TopBar() {
   const ruleList = useTower((s) => s.rules);
   const rules = ruleList.length;
   const tasks = useTasks();
-  const needYou = tasks.filter((t) => t.status === "needs_you" || t.status === "ready");
+  const needYouAll = tasks.filter((t) => t.status === "needs_you" || t.status === "ready");
   const selectTask = useTower((s) => s.selectTask);
   const [showRules, setShowRules] = useState(false);
   const send = useTower((s) => s.send);
   const route = useRoute();
   const [confirmReset, setConfirmReset] = useState(false);
   const watch = useTower((s) => s.watch);
+  const labs = useTower((s) => s.labs);
+  const setLabs = useTower((s) => s.setLabs);
+  // Without Labs, only incidents can need you.
+  const needYou = labs ? needYouAll : needYouAll.filter((t) => t.kind === "incident");
   const cost = tasks.reduce((sum, task) => sum + task.costUsd, 0);
   // A task waiting on you is still active work.
   const working = tasks.filter((task) => task.status === "working" || task.status === "planning" || task.status === "needs_you").length;
@@ -53,10 +58,12 @@ export function TopBar() {
         <span className="sr-only sm:hidden">Control Tower</span>
       </div>
 
-      <nav className="flex items-center gap-1 rounded-lg bg-secondary p-0.5" aria-label="Views">
+      {/* Tabs only with Labs on: otherwise the product is one screen. */}
+      {labs && <nav className="flex items-center gap-1 rounded-lg bg-secondary p-0.5" aria-label="Views">
         {(
           [
-            ["/", "Tasks", route.page === "tower" || route.page === "postmortem"],
+            ["/", "Tower", route.page === "tower" || route.page === "postmortem"],
+            ["/labs", "Labs", route.page === "labs"],
             ["/runs", "Activity", route.page === "runs" || route.page === "run"],
           ] as const
         ).map(([path, label, active]) => (
@@ -72,7 +79,7 @@ export function TopBar() {
             {label}
           </button>
         ))}
-      </nav>
+      </nav>}
 
       <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
         <WatchPill />
@@ -82,14 +89,20 @@ export function TopBar() {
           {!connected
             ? connectionStatus === "connecting" ? "connecting" : "reconnecting"
             : tasks.length
-              ? `${working ? `${working} task${working === 1 ? "" : "s"} active` : "idle"} · ${formatCost(cost)}`
+              ? `${working ? `${working} task${working === 1 ? "" : "s"} active` : "idle"}${labs ? ` · ${formatCost(cost)}` : ""}`
               : "ready"}
         </Pill>
         {needYou.length > 0 && (
           <button
             onClick={() => {
-              selectTask(needYou[0]!.id);
-              navigate("/");
+              const first = needYou[0]!;
+              if (first.kind === "incident" || !labs) {
+                useTower.getState().setShowIncident(true);
+                navigate("/");
+              } else {
+                selectTask(first.id);
+                navigate("/labs");
+              }
             }}
             aria-label={`${needYou.length} task${needYou.length === 1 ? "" : "s"} need${needYou.length === 1 ? "s" : ""} your attention`}
             className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-span-http px-2.5 text-xs font-medium text-white hover:bg-span-http/90 focus-visible:outline-2 focus-visible:outline-ring"
@@ -112,15 +125,22 @@ export function TopBar() {
               <Zap /> Simulate a bad deploy (demo)
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => send({ type: "start", tasks: [] })} disabled={!connected}>
-              <Play /> Start 4 demo coding tasks
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setShowRules(true)}>
-              <ListChecks /> Standing rules{rules ? ` (${rules})` : ""}…
-            </DropdownMenuItem>
+            <DropdownMenuCheckboxItem checked={labs} onCheckedChange={(on) => setLabs(on === true)}>
+              Labs: General and Code tasks
+            </DropdownMenuCheckboxItem>
+            {labs && (
+              <>
+                <DropdownMenuItem onSelect={() => send({ type: "start", tasks: [] })} disabled={!connected}>
+                  <Play /> Start 4 demo coding tasks
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setShowRules(true)}>
+                  <ListChecks /> Standing rules{rules ? ` (${rules})` : ""}…
+                </DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={() => setConfirmReset(true)} disabled={!connected || !tasks.length}>
-              <Trash2 /> Clear all tasks…
+              <Trash2 /> Clear everything…
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

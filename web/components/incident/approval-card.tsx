@@ -38,7 +38,7 @@ export function ApprovalCard({ approval, compact = false, label }: { approval: A
         <Button size="sm" variant="outline" disabled={!connected} onClick={() => send({ type: "approval", id: approval.id, decision: "deny" })}>
           <X data-icon="inline-start" /> Deny
         </Button>
-        {!compact && <span className="ml-auto text-xs text-muted-foreground">or say “approve”</span>}
+        {!compact && <span className="ml-auto text-xs text-muted-foreground">or say “approve” · press A / D</span>}
       </div>
     </div>
   );

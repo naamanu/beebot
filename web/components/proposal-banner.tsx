@@ -20,11 +20,13 @@ export function ProposalBanner() {
             <li key={item}>{item}</li>
           ))}
         </ul>
-        <p className="mt-1.5 text-xs text-muted-foreground">Suggested by the tower{p.source === "jamie" ? " from Jamie's call notes" : ""}. Or say “start the follow-ups”.</p>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          {p.action ? "Proposed by the tower. Say “approve” or press A." : `Suggested by the tower${p.source === "jamie" ? " from Jamie's call notes" : ""}. Or say “start the follow-ups”.`}
+        </p>
       </div>
       <div className="flex shrink-0 gap-2">
         <Button size="sm" disabled={!connected} onClick={() => send({ type: "accept_proposal", id: p.id })}>
-          <Play data-icon="inline-start" /> Start {p.items.length} task{p.items.length === 1 ? "" : "s"}
+          <Play data-icon="inline-start" /> {p.action ? "Approve" : `Start ${p.items.length} task${p.items.length === 1 ? "" : "s"}`}
         </Button>
         <Button size="sm" variant="ghost" disabled={!connected} onClick={() => send({ type: "dismiss_proposal", id: p.id })} aria-label="Dismiss">
           <X />

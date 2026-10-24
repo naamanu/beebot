@@ -12,7 +12,8 @@ import { ErrorRateChart } from "./error-rate-chart";
 const STATUSES: IncidentStatus[] = ["investigating", "identified", "mitigated", "resolved"];
 
 // inline: inside a task whose header already shows the title.
-export function IncidentBar({ incident, inline = false }: { incident: IncidentView; inline?: boolean }) {
+// minimal: the focused incident page shows status and the postmortem itself.
+export function IncidentBar({ incident, inline = false, minimal = false }: { incident: IncidentView; inline?: boolean; minimal?: boolean }) {
   const send = useTower((s) => s.send);
   const open = incident.status !== "resolved";
   const now = useNow(1000, open);
@@ -38,7 +39,7 @@ export function IncidentBar({ incident, inline = false }: { incident: IncidentVi
         </div>
       </div>
 
-      <ToggleGroup
+      {!minimal && <ToggleGroup
         type="single"
         variant="outline"
         size="sm"
@@ -51,13 +52,15 @@ export function IncidentBar({ incident, inline = false }: { incident: IncidentVi
             {s}
           </ToggleGroupItem>
         ))}
-      </ToggleGroup>
+      </ToggleGroup>}
 
       <div className="ml-auto flex items-center gap-5">
         <ErrorRateChart incident={incident} />
-        <Button variant="outline" size="sm" onClick={() => navigate("/postmortem")}>
-          <FileText data-icon="inline-start" /> Postmortem
-        </Button>
+        {!minimal && (
+          <Button variant="outline" size="sm" onClick={() => navigate("/postmortem")}>
+            <FileText data-icon="inline-start" /> Postmortem
+          </Button>
+        )}
       </div>
     </section>
   );

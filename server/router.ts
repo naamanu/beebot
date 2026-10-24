@@ -203,7 +203,7 @@ ${ctx.focused ? `\nThe operator has agent ${ctx.focused} open full-screen. An in
     : ""
 }${planBlock(ctx.pendingPlan)}${
   ctx.pendingProposal
-    ? `\n<suggested_work>\nThe tower suggested: ${ctx.pendingProposal.title}\n${ctx.pendingProposal.items.map((i) => `- ${i}`).join("\n")}\nTo answer it, use target "proposal": "start the follow-ups" / "yes, do them" → approve; "skip those" / "not now" → stop.\n</suggested_work>\n`
+    ? `\n<suggested_work>\nThe tower suggested: ${ctx.pendingProposal.title}\n${ctx.pendingProposal.items.map((i) => `- ${i}`).join("\n")}\nTo answer it, use target "proposal": "approve", "yes", "do it", "start the follow-ups", "roll it back" → approve; "no", "skip those", "not now" → stop. A bare yes or "approve" with no agent waiting for approval is for the suggestion.\n</suggested_work>\n`
     : ""
 }${
   ctx.attachments?.length

@@ -32,6 +32,10 @@ interface TowerState {
   watch: WatchView | null; // production, as the watchtower sees it
   proposals: Proposal[]; // work the tower suggests
   lastSpoken: { text: string; at: number } | null; // what the tower last said aloud
+  labs: boolean; // General and Code tasks: off by default, the product is the incident commander
+  setLabs: (on: boolean) => void;
+  showIncident: boolean; // the incident page instead of the health home
+  setShowIncident: (on: boolean) => void;
   missions: MissionView[];
   selectedTaskId: string | null; // null: the command bar starts a new task
   selectTask: (id: string | null) => void;
@@ -74,6 +78,17 @@ export const useTower = create<TowerState>()((set, get) => ({
   watch: null,
   proposals: [],
   lastSpoken: null,
+  labs: readLabs(),
+  setLabs: (on) => {
+    try {
+      localStorage.setItem("control-tower:labs", on ? "1" : "0");
+    } catch {
+      // storage unavailable: the setting lasts for this tab only
+    }
+    set({ labs: on });
+  },
+  showIncident: false,
+  setShowIncident: (on) => set({ showIncident: on }),
   missions: [],
   selectedTaskId: null,
   selectTask: (id) => {
@@ -273,3 +288,11 @@ function speak(text: string): void {
 
 // Dev-only handle for poking at UI states from the console.
 if (import.meta.env?.DEV) (window as unknown as { __tower: typeof useTower }).__tower = useTower;
+
+function readLabs(): boolean {
+  try {
+    return localStorage.getItem("control-tower:labs") === "1";
+  } catch {
+    return false;
+  }
+}

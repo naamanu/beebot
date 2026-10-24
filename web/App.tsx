@@ -14,6 +14,8 @@ import { TaskDetail } from "@/components/tasks/task-detail";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/top-bar";
 import { ProposalBanner } from "@/components/proposal-banner";
+import { HealthHome } from "@/components/home/health-home";
+import { IncidentPage } from "@/components/incident/incident-page";
 import { useMic } from "@/hooks/use-mic";
 import { useRoute } from "@/hooks/use-route";
 import { useAutoSelectNewTasks, useTasks } from "@/hooks/use-tasks";
@@ -23,6 +25,7 @@ import { connectTower, useTower } from "@/lib/store";
 export function App() {
   const mic = useMic();
   const route = useRoute();
+  const labs = useTower((s) => s.labs);
   useEffect(() => connectTower(), []);
 
   return (
@@ -31,7 +34,9 @@ export function App() {
         <div className="flex h-dvh flex-col overflow-hidden bg-background">
           <TopBar />
           <ConnectionNotice />
-          {route.page === "tower" ? (
+          {route.page === "tower" || (route.page === "labs" && !labs) ? (
+            <TowerView micOn={mic.on} onToggleMic={mic.toggle} />
+          ) : route.page === "labs" ? (
             <TasksView micOn={mic.on} onToggleMic={mic.toggle} />
           ) : (
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 lg:overflow-hidden">
@@ -40,7 +45,7 @@ export function App() {
               ) : route.page === "postmortem" ? (
                 <PostmortemPage />
               ) : (
-                <ActivityView taskId={route.taskId} />
+                <ActivityView taskId={route.page === "runs" ? route.taskId : null} />
               )}
             </div>
           )}
@@ -52,7 +57,65 @@ export function App() {
   );
 }
 
-// Tasks on the left, the selected task on the right, one input underneath.
+// The product: production's health, or the incident the tower is working,
+// with one input underneath.
+function TowerView({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: () => void }) {
+  const tasks = useTasks();
+  const incident = useTower((s) => s.incident);
+  const showIncident = useTower((s) => s.showIncident);
+  const setShowIncident = useTower((s) => s.setShowIncident);
+  const selectTask = useTower((s) => s.selectTask);
+  const incidentTask = tasks.find((t) => t.kind === "incident") ?? null;
+  const showing = showIncident && incident && incidentTask;
+  useApprovalKeys();
+
+  // A new open incident (usually one the tower declared itself) takes over.
+  useEffect(() => {
+    if (incident && incident.status !== "resolved") setShowIncident(true);
+  }, [incident?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The command bar talks to the incident while it is on screen.
+  useEffect(() => {
+    selectTask(showing ? incidentTask.id : null);
+  }, [showing ? incidentTask.id : null]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <ProposalBanner />
+      {showing ? <IncidentPage task={incidentTask} /> : <HealthHome />}
+      <CommandBar micOn={micOn} onToggleMic={onToggleMic} simple />
+    </div>
+  );
+}
+
+// A waiting approval answered from the keyboard: A approves, D denies.
+function useApprovalKeys() {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      const el = e.target as HTMLElement | null;
+      if (el?.closest("input, textarea, select, [contenteditable], [role='dialog'], [role='menu']")) return;
+      const key = e.key.toLowerCase();
+      if (key !== "a" && key !== "d") return;
+      const { agents, proposals, send } = useTower.getState();
+      const waiting = agents.filter((a) => a.approval).sort((x, y) => x.approval!.at - y.approval!.at)[0];
+      if (waiting) {
+        e.preventDefault();
+        send({ type: "approval", id: waiting.approval!.id, decision: key === "a" ? "approve" : "deny" });
+        return;
+      }
+      // A fix the tower proposed itself.
+      const fix = proposals.find((p) => p.action);
+      if (!fix) return;
+      e.preventDefault();
+      send({ type: key === "a" ? "accept_proposal" : "dismiss_proposal", id: fix.id });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+}
+
+// Labs: tasks on the left, the selected task on the right, one input underneath.
 function TasksView({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: () => void }) {
   const tasks = useTasks();
   const selectedId = useTower((s) => s.selectedTaskId);

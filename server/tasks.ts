@@ -14,7 +14,11 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
     const ready = members.length > 0 && !active;
     const recovered = isRecovered(incident);
     const status: TaskStatus = incident.status === "resolved" ? "done" : needs.length ? "needs_you" : ready ? "ready" : "working";
-    if (status === "ready") needs.push({ type: "completion", label: recovered ? "Errors are back to normal: resolve it?" : "Review findings and mark done" });
+    if (status === "ready")
+      needs.push({
+        type: "completion",
+        label: recovered ? "Errors are back to normal: resolve it?" : incident.fixAppliedAt === null ? "Investigators finished: a fix is waiting for you" : "Recovering: watch the errors come down",
+      });
     tasks.push({
       id: incident.id,
       kind: "incident",

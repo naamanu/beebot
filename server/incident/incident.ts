@@ -72,6 +72,7 @@ export class Incident {
   timeline: TimelineEntry[] = [];
   findings: Finding[] = [];
   postmortem: string | null = null;
+  postmortemState: "none" | "writing" | "ready" | "error" = "none";
   jamieMeetingId: string | null = null;
 
   // sim: the production the watchtower already watches. Without it, a fresh
@@ -82,7 +83,7 @@ export class Incident {
     private jamie: Jamie,
     private onChange: () => void,
     sim?: ShopfrontSim,
-    declaredBy = "commander",
+    readonly declaredBy = "commander",
   ) {
     this.sim = sim ?? new ShopfrontSim();
     this.declaredAt = Date.now();
@@ -115,7 +116,10 @@ export class Incident {
       timeline: this.timeline,
       statusPosts: this.sim.statusPosts,
       hasPostmortem: !!this.postmortem,
+      postmortemState: this.postmortemState,
       jamieMeetingId: this.jamieMeetingId,
+      declaredBy: this.declaredBy,
+      fixAppliedAt: this.sim.fixedAt,
     };
   }
 

@@ -25,7 +25,9 @@ export async function uploadFile(file: File): Promise<Upload> {
 }
 
 // The one place to start or steer work. Type, or hold Space to talk into it.
-export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic: () => void }) {
+// simple: the incident commander's bar. No kinds of work or planning modes:
+// new work there is an incident; with one open, words go to its agents.
+export function CommandBar({ micOn, onToggleMic, simple = false }: { micOn: boolean; onToggleMic: () => void; simple?: boolean }) {
   const draft = useTower((s) => s.draft);
   const setDraft = useTower((s) => s.setDraft);
   const send = useTower((s) => s.send);
@@ -91,9 +93,9 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
     const sent = send({
       type: "say",
       text,
-      template: draft.template,
+      template: simple ? "incident" : draft.template,
       attachments: draft.attachments.map((a) => a.id),
-      plan: shouldPlan(draft.plan, text, false) && draft.template !== "incident",
+      plan: !simple && shouldPlan(draft.plan, text, false) && draft.template !== "incident",
       taskId: task?.id ?? null,
     });
     if (sent) setDraft({ text: "", attachments: [] });
@@ -182,11 +184,21 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
                   addFiles(e.clipboardData.files);
                 }
               }}
-              placeholder={task ? "Message this task…" : placeholder(draft.template, !!incident)}
+              placeholder={
+                simple
+                  ? task
+                    ? "Talk to the investigators… e.g. “roll back 482” or “resolve the incident”"
+                    : "Tell the tower… e.g. “declare an incident: checkout is failing”"
+                  : task
+                    ? "Message this task…"
+                    : placeholder(draft.template, !!incident)
+              }
               className="min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[15px] leading-snug outline-none placeholder:text-muted-foreground"
             />
           )}
 
+          {!simple && (
+            <>
           <input
             ref={fileInput}
             type="file"
@@ -205,13 +217,20 @@ export function CommandBar({ micOn, onToggleMic }: { micOn: boolean; onToggleMic
             </TooltipTrigger>
             <TooltipContent>Attach files (or drop / paste them)</TooltipContent>
           </Tooltip>
+            </>
+          )}
           <Button size="icon" className="shrink-0 rounded-xl" onClick={submit} disabled={!canSend} aria-label="Send">
             <ArrowUp />
           </Button>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-3 py-2">
-          {task ? (
+          {simple ? (
+            <>
+              <span className="text-[11px] text-muted-foreground">{task ? `To: ${task.title}` : "To: the tower"}</span>
+              <PreviewLine preview={preview} template="incident" hasFiles={false} incidentActive={!!incident} plan={false} />
+            </>
+          ) : task ? (
             <>
               <span className="text-[11px] text-muted-foreground">To:</span>
               <span className="inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-foreground/20 bg-foreground px-2.5 text-xs text-background sm:max-w-80" title={task.title}>

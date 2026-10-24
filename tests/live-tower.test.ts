@@ -11,7 +11,7 @@ function investigator(id: string, status: AgentView["status"]): AgentView {
 function incident(errorRates: number[], status: IncidentView["status"] = "investigating"): IncidentView {
   return {
     id: "inc-1", title: "Checkout failing", severity: "SEV1", status, declaredAt: 1, impactAt: 0, mitigatedAt: null,
-    errorRate: errorRates.map((v, i) => ({ t: i, v })), findings: [], timeline: [], statusPosts: [], hasPostmortem: false, jamieMeetingId: null,
+    errorRate: errorRates.map((v, i) => ({ t: i, v })), findings: [], timeline: [], statusPosts: [], hasPostmortem: false, postmortemState: "none", jamieMeetingId: null, declaredBy: "commander", fixAppliedAt: null,
   };
 }
 

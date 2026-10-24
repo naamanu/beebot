@@ -72,7 +72,7 @@ test("standing down suppresses the current breach; turning it off suppresses all
 function view(errorRates: number[], extra: Partial<IncidentView> = {}): IncidentView {
   return {
     id: "inc", title: "Checkout", severity: "SEV1", status: "investigating", declaredAt: 0, impactAt: 0, mitigatedAt: null,
-    errorRate: errorRates.map((v, i) => ({ t: i, v })), findings: [], timeline: [], statusPosts: [], hasPostmortem: false, jamieMeetingId: null, ...extra,
+    errorRate: errorRates.map((v, i) => ({ t: i, v })), findings: [], timeline: [], statusPosts: [], hasPostmortem: false, postmortemState: "none", jamieMeetingId: null, declaredBy: "commander", fixAppliedAt: null, ...extra,
   };
 }
 

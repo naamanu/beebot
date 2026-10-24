@@ -22,10 +22,11 @@ const isActive = (a: AgentView) => a.status === "working" || a.status === "start
 
 // While any of its agents is active, a task is shown as a live control tower;
 // once they've all stopped, as a story you can review.
-export function TaskDetail({ task }: { task: TaskView }) {
+// embedded: inside the incident page, which has its own header and status.
+export function TaskDetail({ task, embedded = false }: { task: TaskView; embedded?: boolean }) {
   const agents = useTower((s) => s.agents);
   const members = task.agentIds.flatMap((id) => agents.filter((a) => a.id === id));
-  return members.some(isActive) ? <LiveTask task={task} members={members} /> : <TaskStory task={task} />;
+  return members.some(isActive) ? <LiveTask task={task} members={members} embedded={embedded} /> : <TaskStory task={task} embedded={embedded} />;
 }
 
 function TaskHeader({ task }: { task: TaskView }) {
@@ -72,7 +73,7 @@ function TaskHeader({ task }: { task: TaskView }) {
 
 // The tower: every agent of the task streaming side by side, with what needs
 // you, the plan and findings in a rail beside them.
-function LiveTask({ task, members }: { task: TaskView; members: AgentView[] }) {
+function LiveTask({ task, members, embedded }: { task: TaskView; members: AgentView[]; embedded: boolean }) {
   const missions = useTower((s) => s.missions);
   const incident = useTower((s) => s.incident);
   const mission = task.missionId ? missions.find((m) => m.id === task.missionId) : undefined;
@@ -82,10 +83,10 @@ function LiveTask({ task, members }: { task: TaskView; members: AgentView[] }) {
   const rail = waiting.length > 0 || task.needs.some((x) => x.type === "plan") || (mission && !mission.quick && mission.plan) || (task.kind === "incident" && incident);
   return (
     <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
-      <TaskHeader task={task} />
+      {!embedded && <TaskHeader task={task} />}
       {task.kind === "incident" && incident && (
         <div className="border-b border-border px-4 py-3 [&>section]:shadow-none [&>section]:ring-0 [&>section]:p-0">
-          <IncidentBar incident={incident} inline />
+          <IncidentBar incident={incident} inline minimal={embedded} />
         </div>
       )}
       <div className="flex min-h-0 flex-1 gap-3 bg-background/60 p-3">
@@ -154,7 +155,7 @@ function CompactPlan({ mission, members }: { mission: NonNullable<ReturnType<typ
 
 // One task as a story, top to bottom: what you asked, what needs you, the
 // plan, the agents, the result, and (collapsed) everything that happened.
-function TaskStory({ task }: { task: TaskView }) {
+function TaskStory({ task, embedded }: { task: TaskView; embedded: boolean }) {
   const agents = useTower((s) => s.agents);
   const missions = useTower((s) => s.missions);
   const incident = useTower((s) => s.incident);
@@ -166,16 +167,23 @@ function TaskStory({ task }: { task: TaskView }) {
 
   return (
     <article className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
-      <TaskHeader task={task} />
+      {!embedded && <TaskHeader task={task} />}
 
       <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
         <div className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-5 sm:px-6">
-          {task.kind === "incident" && incident && <IncidentBar incident={incident} />}
+          {task.kind === "incident" && incident && <IncidentBar incident={incident} minimal={embedded} />}
 
-          {task.status === "ready" && (
+          {task.status === "ready" && task.kind === "incident" && incident && incident.fixAppliedAt === null && (
+            // Investigators done but customers still failing: never suggest closing it.
+            <div role="status" className="rounded-xl border border-span-http/40 bg-span-http/5 p-4 text-sm">
+              <p className="font-medium">The investigators have finished, but checkout errors are still high.</p>
+              <p className="mt-1 text-muted-foreground">The tower has proposed a fix above. Approve it, or tell the investigators what to do next.</p>
+            </div>
+          )}
+          {task.status === "ready" && !(task.kind === "incident" && incident && incident.fixAppliedAt === null) && (
             <div role="status" className="rounded-xl border border-span-tool/25 bg-span-tool/5 p-4 text-sm">
               <p className="font-medium">All agents have finished their current work.</p>
-              <p className="mt-1 text-muted-foreground">{task.kind === "incident" ? "Review the findings and any remaining follow-ups. Mark done when you are ready to resolve the incident." : "Review the result below, then mark this task done. You can send a follow-up to an agent if something needs changing."}</p>
+              <p className="mt-1 text-muted-foreground">{task.kind === "incident" ? "Review the findings and any remaining follow-ups, then resolve the incident." : "Review the result below, then mark this task done. You can send a follow-up to an agent if something needs changing."}</p>
             </div>
           )}
 
