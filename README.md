@@ -1,5 +1,15 @@
 # Control Tower
 
+<p align="center">
+  <a href="docs/media/control-tower-tour.mp4">
+    <img src="docs/media/control-tower-tour-preview.gif" alt="Control Tower tour: the tower detects a bad deploy, four agents investigate, the engineer approves a rollback and the postmortem is written" width="820">
+  </a>
+  <br>
+  <a href="docs/media/control-tower-tour.mp4"><b>▶ Watch the 1-minute tour (MP4)</b></a>
+  <br>
+  <sub>An animated recreation of a recorded run against the simulated store. Findings and times come from that run; waits are shortened.</sub>
+</p>
+
 Control Tower is a voice-controlled AI incident commander that helps engineering teams investigate service outages, approve recovery actions and turn incident reviews into follow-up work.
 
 During an outage, engineers must inspect logs, compare deployments, check metrics, communicate progress and document decisions—all while trying to restore service. Control Tower coordinates these activities through specialized AI agents and gives the engineer one place to direct their work. It can initiate an investigation when it detects a problem, provide spoken updates and request human approval before taking consequential actions.
