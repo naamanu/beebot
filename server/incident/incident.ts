@@ -1,8 +1,10 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { IncidentStatus, IncidentView, TimelineEntry } from "../types.ts";
+import type { IncidentStatus, IncidentView, SkippedInvestigation, TimelineEntry } from "../types.ts";
+import { isRecovered } from "../tasks.ts";
 import { Jamie, SAMPLE_PAST_INCIDENTS } from "./jamie.ts";
 import { SERVICES, ShopfrontSim, type Metric, type Service } from "./sim.ts";
+import { FindingsReview } from "./recommendation.ts";
 
 export const MCP_NAME = "shopfront";
 
@@ -52,6 +54,7 @@ export function incidentPrompt(role: string): string {
     `Use the ${MCP_NAME} tools to inspect production. You have no shell or file access, and none is needed.`,
     "Record each solid finding with add_finding (one sentence, with evidence) and read_findings to build on your teammates' work.",
     "Search past incidents early: history often repeats.",
+    "Timing alone does not prove a deploy caused the outage. Check the failure mechanism and consider external provider failures. Only propose a rollback when recorded evidence links the change to the failure; otherwise record what is missing and suggest the next checks.",
     "Rollbacks, restarts and status-page posts need the commander's approval: call the tool and it will wait for them. Say in one sentence why before you call it.",
     "Be brief. Finish with a two-sentence summary of what you found.",
   ].join(" ");
@@ -74,6 +77,8 @@ export class Incident {
   postmortem: string | null = null;
   postmortemState: "none" | "writing" | "ready" | "error" = "none";
   jamieMeetingId: string | null = null;
+  readonly review: FindingsReview;
+  skippedInvestigation?: SkippedInvestigation;
 
   // sim: the production the watchtower already watches. Without it, a fresh
   // simulation with the outage already 9 minutes in (the classic drill).
@@ -85,6 +90,7 @@ export class Incident {
     sim?: ShopfrontSim,
     readonly declaredBy = "commander",
   ) {
+    this.review = new FindingsReview(onChange);
     this.sim = sim ?? new ShopfrontSim();
     this.declaredAt = Date.now();
     this.log("declared", declaredBy === "watchtower" ? `Detected and declared by the watchtower: ${title}` : `Incident declared: ${title}`, declaredBy);
@@ -101,6 +107,23 @@ export class Incident {
     this.log("status", `Status → ${status}`, by);
   }
 
+  skipInvestigation(by: string): void {
+    if (this.status === "resolved") throw new Error("This investigation is already closed.");
+    const { state, decision } = this.review.view;
+    if (state !== "ready" || decision?.action !== "investigate") throw new Error("There are no pending investigation checks to skip.");
+    const at = Date.now();
+    const recoveryConfirmed = isRecovered(this.view());
+    this.sim.restoreForDemo(at);
+    this.skippedInvestigation = {
+      at, by, reason: decision.reason,
+      openQuestions: [...decision.missingEvidence],
+      recoveryConfirmed,
+      demoRecoveryAt: at,
+    };
+    this.log("action", "Demo reset: simulated services restored to healthy immediately. This was a simulator control, not an agent fix or rollback; the diagnosis and open questions remain unchanged.", "simulator", at);
+    this.log("instruction", `Commander skipped further investigation and closed the investigation with open questions. Simulated customer impact ended with the explicit demo reset.\nAssessment: ${decision.reason}\nDeferred checks:\n${decision.missingEvidence.map((q) => `- ${q}`).join("\n")}`, by, at);
+  }
+
   view(): IncidentView {
     const now = Date.now();
     return {
@@ -110,7 +133,7 @@ export class Incident {
       status: this.status,
       declaredAt: this.declaredAt,
       impactAt: this.sim.impactAt,
-      mitigatedAt: this.timeline.find((t) => t.kind === "status" && /mitigated|resolved/.test(t.text))?.at ?? null,
+      mitigatedAt: this.skippedInvestigation?.demoRecoveryAt ?? (this.skippedInvestigation && !this.skippedInvestigation.recoveryConfirmed ? null : this.timeline.find((t) => t.kind === "status" && /mitigated|resolved/.test(t.text))?.at ?? null),
       errorRate: this.sim.series("checkout-api", "error_rate", 15, now).map((p) => ({ t: p.t, v: Math.round(p.v * 10) / 10 })),
       findings: this.findings,
       timeline: this.timeline,
@@ -120,6 +143,9 @@ export class Incident {
       jamieMeetingId: this.jamieMeetingId,
       declaredBy: this.declaredBy,
       fixAppliedAt: this.sim.fixedAt,
+      recommendation: this.review.view,
+      skippedInvestigation: this.skippedInvestigation,
+      canSkipInvestigation: this.status !== "resolved" && this.review.view.state === "ready" && this.review.view.decision?.action === "investigate",
     };
   }
 
@@ -162,14 +188,14 @@ export class Incident {
         ),
         tool("list_deploys", "List recent deploys and config changes, newest first.", {}, async () =>
           text(
-            [...this.sim.deploys]
+            this.sim.deploys.filter((d) => d.at <= Date.now())
               .sort((a, b) => b.at - a.at)
               .map((d) => `#${d.id}  ${new Date(d.at).toISOString().slice(11, 19)}  ${d.service.padEnd(13)} ${d.author.padEnd(14)} ${d.message}${d.rolledBackAt ? "  (rolled back)" : ""}`)
               .join("\n"),
           ),
         ),
         tool("get_deploy", "Show the diff of one deploy.", { deploy_id: z.string() }, async ({ deploy_id }) => {
-          const d = this.sim.deploys.find((x) => x.id === deploy_id.replace("#", ""));
+          const d = this.sim.deploys.find((x) => x.id === deploy_id.replace("#", "") && x.at <= Date.now());
           return text(d ? `#${d.id} ${d.service} by ${d.author}: ${d.message}\n\n${d.diff}` : `No deploy #${deploy_id}`);
         }),
         tool(

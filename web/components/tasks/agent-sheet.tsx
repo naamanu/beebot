@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowUp, Square, Undo2, Waypoints, WrapText } from "lucide-react";
+import { ArrowUp, Check, Square, Undo2, Waypoints, WrapText } from "lucide-react";
 import { toast } from "sonner";
 import type { AgentView } from "../../../server/types.ts";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Timeline } from "@/components/agent-timeline";
 import { ApprovalCard } from "@/components/incident/approval-card";
 import { OutputsPanel, useOutputs } from "@/components/outputs-panel";
 import { useNow } from "@/hooks/use-now";
+import { useTasks } from "@/hooks/use-tasks";
 import { navigate } from "@/hooks/use-route";
 import { STATUS_STYLE, agentName, formatDuration } from "@/lib/spans";
 import { useTower } from "@/lib/store";
@@ -45,6 +46,7 @@ function AgentDetail({ agent, draft, onDraftChange }: { agent: AgentView; draft:
   const live = agent.status === "working" || agent.status === "starting";
   const now = useNow(1000, live);
   const outputs = useOutputs(agent).data ?? [];
+  const task = useTasks().find((candidate) => candidate.kind === "work" && candidate.agentIds.includes(agent.id));
   const [tab, setTab] = useState<"activity" | "outputs">(focusedOutput || (outputs.length && !live) ? "outputs" : "activity");
   const first = agent.events[0]?.at;
   const elapsed = first ? (live ? now : (agent.events.at(-1)?.at ?? now)) - first : 0;
@@ -54,6 +56,11 @@ function AgentDetail({ agent, draft, onDraftChange }: { agent: AgentView; draft:
     <div className="flex h-full min-h-0 flex-col">
       <SheetHeader className="gap-3 border-b border-border p-5 pr-12">
         <div className="flex flex-wrap items-center gap-2">
+          {task?.status === "ready" && (
+            <Button size="sm" disabled={!connected} onClick={() => send({ type: "complete_task", taskId: task.id })} title={`Accept the reviewed result and finish “${task.title}”`}>
+              <Check data-icon="inline-start" /> Mark task done
+            </Button>
+          )}
           <span className="grid size-7 place-items-center rounded-md bg-secondary font-heading text-sm" title={`Say “${agent.id}” to address this agent`}>
             {agent.id}
           </span>

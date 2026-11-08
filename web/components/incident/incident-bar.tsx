@@ -1,3 +1,4 @@
+import { hasUnconfirmedRecovery } from "@/lib/incident-status";
 import { FileText, Siren } from "lucide-react";
 import type { IncidentStatus, IncidentView } from "../../../server/types.ts";
 import { Button } from "@/components/ui/button";
@@ -17,7 +18,7 @@ export function IncidentBar({ incident, inline = false, minimal = false }: { inc
   const send = useTower((s) => s.send);
   const open = incident.status !== "resolved";
   const now = useNow(1000, open);
-  const end = incident.mitigatedAt ?? now;
+  const end = incident.mitigatedAt ?? incident.skippedInvestigation?.at ?? now;
 
   return (
     <section className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-3 rounded-xl bg-card px-5 py-3.5 ring-1 ring-foreground/10">
@@ -33,7 +34,7 @@ export function IncidentBar({ incident, inline = false, minimal = false }: { inc
             {!inline && <h2 className="truncate text-lg leading-tight">{incident.title}</h2>}
           </div>
           <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-            impact {formatDuration(end - incident.impactAt)}
+            {hasUnconfirmedRecovery(incident) ? "recovery unconfirmed; observed impact " : "impact "}{formatDuration(end - incident.impactAt)}
             {incident.mitigatedAt ? " (mitigated)" : ""} · declared {formatDuration(now - incident.declaredAt)} ago
           </p>
         </div>
@@ -49,7 +50,7 @@ export function IncidentBar({ incident, inline = false, minimal = false }: { inc
       >
         {STATUSES.map((s) => (
           <ToggleGroupItem key={s} value={s} className="px-2.5 text-xs capitalize">
-            {s}
+            {s === "resolved" && hasUnconfirmedRecovery(incident) ? "Closed with open questions" : s}
           </ToggleGroupItem>
         ))}
       </ToggleGroup>}

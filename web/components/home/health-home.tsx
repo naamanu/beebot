@@ -1,5 +1,6 @@
+import { hasUnconfirmedRecovery } from "@/lib/incident-status";
 import { useState } from "react";
-import { ArrowRight, CheckCircle2, Eye, EyeOff, Siren, Zap } from "lucide-react";
+import { ArrowRight, Check, CheckCircle2, Eye, EyeOff, Siren, Zap } from "lucide-react";
 import type { WatchView } from "../../../server/types.ts";
 import { Button } from "@/components/ui/button";
 import { TaskStatusIcon, TaskStatusLabel } from "@/components/tasks/task-status";
@@ -54,6 +55,9 @@ export function HealthHome() {
           <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage" })} title="Lands a bad deploy on the simulated store">
             <Zap data-icon="inline-start" /> Simulate a bad deploy
           </Button>
+          <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage", scenario: "provider" })} title="An external provider fails; no local deploy is to blame">
+            <Zap data-icon="inline-start" /> Simulate provider outage
+          </Button>
         </div>
       </section>
 
@@ -68,7 +72,7 @@ export function HealthHome() {
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[14px] font-medium">{incident.title}</span>
               <span className="text-[12.5px] text-muted-foreground">
-                {incident.status === "resolved" ? "Resolved" : "In progress"} · {incident.findings.length} findings
+                {hasUnconfirmedRecovery(incident) ? "Closed with open questions" : incident.status === "resolved" ? incident.skippedInvestigation?.demoRecoveryAt !== undefined ? "Resolved (demo reset)" : "Resolved" : "In progress"} · {incident.findings.length} findings
                 {incident.mitigatedAt ? ` · customers affected for ${formatDuration(incident.mitigatedAt - incident.impactAt)}` : ""}
               </span>
             </span>
@@ -82,11 +86,11 @@ export function HealthHome() {
           <h2 className="mb-2 text-[12px] font-medium tracking-wide text-muted-foreground uppercase">Follow-ups from the review</h2>
           <ul className="flex flex-col divide-y divide-border rounded-xl ring-1 ring-foreground/10">
             {followUps.map((t) => (
-              <li key={t.id}>
+              <li key={t.id} className="flex items-center gap-2 pr-3">
                 <button
                   onClick={() => setFocus(t.resultAgentId ?? t.agentIds[0] ?? null)}
                   disabled={!t.agentIds.length}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-accent"
+                  className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent"
                 >
                   <TaskStatusIcon status={t.status} className="size-4 shrink-0" />
                   <span className="min-w-0 flex-1 truncate text-[14px]">{t.title}</span>
@@ -94,6 +98,11 @@ export function HealthHome() {
                     <TaskStatusLabel status={t.status} />
                   </span>
                 </button>
+                {t.status === "ready" && (
+                  <Button size="sm" variant="outline" disabled={!connected} onClick={() => send({ type: "complete_task", taskId: t.id })} title={`Accept the reviewed result and finish “${t.title}”`}>
+                    <Check data-icon="inline-start" /> Mark done
+                  </Button>
+                )}
               </li>
             ))}
           </ul>

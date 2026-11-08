@@ -17,7 +17,7 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
     if (status === "ready")
       needs.push({
         type: "completion",
-        label: recovered ? "Errors are back to normal: resolve it?" : incident.fixAppliedAt === null ? "Investigators finished: a fix is waiting for you" : "Recovering: watch the errors come down",
+        label: incidentReviewLabel(incident, recovered),
       });
     tasks.push({
       id: incident.id,
@@ -35,7 +35,7 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
       resultAgentId: null,
       result: null,
       branch: null,
-      costUsd: members.reduce((s, a) => s + a.costUsd, 0),
+      costUsd: members.reduce((s, a) => s + a.costUsd, 0) + (incident.recommendation?.costUsd ?? 0),
       followUp: false,
     });
   }
@@ -72,6 +72,15 @@ export function buildTasks(agents: AgentView[], missions: MissionView[], inciden
   // Needs you first, then working, then finished; newest first within each.
   const rank: Record<TaskStatus, number> = { needs_you: 0, ready: 0, planning: 1, working: 1, failed: 2, stopped: 2, done: 3 };
   return tasks.sort((x, y) => rank[x.status] - rank[y.status] || y.createdAt - x.createdAt);
+}
+
+function incidentReviewLabel(incident: IncidentView, recovered: boolean): string {
+  if (recovered) return "Errors are back to normal: resolve it?";
+  if (incident.fixAppliedAt !== null) return "Recovering: watch the errors come down";
+  if (incident.recommendation?.state === "reviewing") return "Reviewing the investigation evidence";
+  if (incident.recommendation?.decision?.action === "investigate") return "More evidence needed: review the next checks";
+  if (incident.recommendation?.state === "error") return "Evidence review failed: retry or direct an investigator";
+  return "Investigators finished: review findings and approvals";
 }
 
 // Checkout errors back near the 0.4% baseline for the last few samples.

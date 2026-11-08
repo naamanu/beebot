@@ -124,6 +124,12 @@ export function TopBar() {
             <DropdownMenuItem onSelect={() => send({ type: "simulate_outage" })} disabled={!connected || watch?.state === "anomaly"}>
               <Zap /> Simulate a bad deploy (demo)
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => send({ type: "simulate_outage", scenario: "provider" })} disabled={!connected || watch?.state === "anomaly"}>
+              <Zap /> Simulate provider outage (demo)
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => send({ type: "recover_provider" })} disabled={!connected || watch?.state !== "anomaly"}>
+              <Zap /> Simulate provider recovery
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuCheckboxItem checked={labs} onCheckedChange={(on) => setLabs(on === true)}>
               Labs: General and Code tasks

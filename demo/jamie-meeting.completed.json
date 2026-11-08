@@ -1,0 +1,150 @@
+{
+  "event": "meeting.completed",
+  "data": {
+    "title": "[SIMULATED] Shopfront incident retrospective — remediation and agent follow-ups",
+    "startTime": "2026-10-24T16:00:00.000Z",
+    "endTime": "2026-10-24T16:25:00.000Z",
+    "summary": {
+      "short": "Simulated retrospective grounded in implemented fixes: evidence-based remediation, current-state approval checks, an external provider counterexample, accurate vote-agreement wording, and demo documentation. Five completed implementation items and three proposed document follow-ups. No real Jamie meeting or live incident execution is claimed.",
+      "markdown": "# SIMULATED meeting: Shopfront incident retrospective and Control Tower fixes\n\n> Demo fixture. This is a fictional meeting written from the implemented Control Tower code and its deterministic Shopfront scenarios. It was not recorded or processed by Jamie. No saved incident-agent results were available. Participant dialogue and meeting times are illustrative. The remediation below describes the simulator's behavior and the code changes, not an observed live production recovery or a verified live model diagnosis.\n\n## Purpose and outcome\n\nThe team examined why checkout failures must be explained with evidence before a rollback is recommended. The primary drill is a payments connection-exhaustion incident: on a fresh server, deploy #482 reduces DB_POOL_MAX from 50 to 5 and increases PAYMENT_RETRY_ATTEMPTS from 3 to 6. Payments requests wait for connections, payments-api emits acquisition timeouts and 503s, and checkout-api reports upstream timeouts. The implemented rollback reverses the simulated change; the modeled checkout error rate then falls over approximately 45 seconds. An unrelated CDN change and older search warnings are distractions, not sufficient reasons to change those services.\n\nThe second drill is an external payment-provider outage. The provider and payments-api expose upstream 503 evidence while the local database remains healthy. No causal local deploy is introduced. Local rollbacks and pod restarts leave this scenario broken; only the explicit simulator provider-recovery control restores external service. The purpose is to exercise a recommendation that declines an unsupported rollback and identifies useful next checks. Live model performance on this scenario still requires rehearsal.\n\n## Contributions discussed by the simulated participants\n\n- Logs investigator: identify the originating failure mechanism, distinguishing local connection-acquisition timeouts from external provider 503s. Record the service, signature and observation as shared findings.\n- Changes investigator: compare visible changes with the onset and the mechanism. A recent change is a lead. A specific diff plus matching failure evidence is stronger support for a rollback than temporal proximity alone.\n- Metrics investigator: compare checkout errors, payments latency, local connection usage and external-provider health. Use these observations to separate a saturated local dependency from a failing upstream supplier.\n- Comms investigator: draft customer updates using confirmed impact and known mitigation steps. Customer-facing posts require approval. Do not present a suspicion as a confirmed cause.\n- Commander: approve the specific consequential action, watch recovery, and decide when to close the incident. Completing an agent report does not close it automatically.\n\n## Fixes implemented in Control Tower\n\n### 1. Evidence-based recommendation replaces the answer shortcut\n\nPreviously, the final fallback read production.badDeploy, so it could name the simulator's culprit even when investigators had not established it. The new review boundary accepts recorded findings with stable, numbered references and visible deploy records only. It receives no known-culprit flag or simulator cause object. With findings available, a structured model call returns either one rollback target with a reason and citations, or further investigation with concrete missing checks. With no findings, the system asks for evidence without calling the model. This implementation is complete; live diagnostic accuracy is not established by fixture tests.\n\n### 2. Structural validation and approval checks\n\nThe server rejects unknown finding references, missing rollback citations, unavailable or already reverted deploys, and rollback recommendations that still declare evidence gaps. Requests for further investigation must have no rollback target and must include next checks. Before an approved proposal can act, the server checks that the incident, evidence snapshot and deploy are still current and that investigators are not busy. These checks establish valid references and current state; they do not prove that a model's interpretation of the evidence is correct.\n\n### 3. Review lifecycle and operator visibility\n\nRepeated timer ticks do not create duplicate review calls for the same evidence. New evidence supersedes an older review. Resuming investigation, replacing or closing the incident invalidates pending work. A late model reply cannot overwrite a newer review. The incident screen shows reviewing, a cited recommendation, more evidence needed, or a retryable error. Failure does not silently fall back to the known simulator answer. Recommendation reasons, cited findings and next checks enter the timeline.\n\n### 4. Provider-outage counterexample\n\nThe simulator now includes payment-provider metrics and logs, external 503s, a healthy local database during that scenario, and an explicit provider-recovery demo control. A local restart or unrelated rollback cannot clear this external outage. Future deploys are excluded from investigator-visible deploy records. These deterministic behaviors have local test coverage; a model declining the wrong rollback still needs to be observed in a live drill.\n\n### 5. Accurate vote wording and demo documentation\n\nThe router takes five samples from the same model by default. At least three must agree on the target, intent and incident action to apply a command; ignoring chatter requires four. Unclear targets still trigger clarification. Vote agreement is not a calibrated probability of correctness, and failed responses remain in the requested-vote denominator. The UI now retains that denominator. The README includes architecture, APIs, technologies and simulation limits, and a two-minute submission storyboard has been prepared. A storyboard is not a recorded video.\n\n## Decisions and constraints\n\n1. Retain the detector's initial deploy suspect: it is ordinary timing correlation. Label it as suspicion rather than a diagnosis.\n2. Keep all rollback, restart and customer-status actions under explicit human approval.\n3. Show both the connection-exhaustion and external-provider drills in preparation. Do not edit a wrong live recommendation into an apparently successful result.\n4. Keep the simulated meeting clearly labeled throughout the demonstration. Replaying this JSON exercises the local webhook handling; it does not demonstrate a real Jamie API call or Jamie transcription.\n5. Accepting a follow-up proposal launches one agent per incomplete task. The current coding destination is a demo todo repository, and incident context is not attached automatically. The three open items therefore carry their own context and request standalone documents in outputs/.\n6. A real Jamie recording, the final video and any claimed production benefit remain outstanding. No benchmark claim is made.\n\n## Verification discussed\n\nThe most recent implementation check passed 95 local fixture tests, TypeScript checking and the Vite production build. The build retained its bundle-size warning. Those checks cover deterministic simulator behavior, review validation, duplicate/cancelled/stale responses and UI states. They do not establish live Anthropic, Reson8 or Jamie behavior.\n\n## Open follow-ups and acceptance criteria\n\n- Commander: produce outputs/incident-evidence-checklist.md. Explain when the connection-exhaustion evidence supports a rollback and when external 503s require further investigation. Separate observation, inference, missing evidence and the human approval step. Include the recovery confirmation and the limits of valid citations.\n- Comms: produce outputs/jury-questions.md. Answer likely questions about simulator scope, the removed answer shortcut, correlation versus causation, majority agreement, human authorization, and the difference between this fixture and real Jamie usage. Use only implemented behavior; keep live rehearsal and video recording listed as pending.\n- Metrics: produce outputs/partner-demo-guide.md. Describe replaying this simulated event, identifying the proposed tasks, accepting or dismissing them, and observing ready-for-human-check completion. Explain how a later real Jamie conversation would replace the fixture. Do not claim an external recording, production modification or benchmark result exists.\n\nCompleted implementation items remain recorded as completed below. They must not be launched again merely because the meeting event is received. The three incomplete document tasks remain suggestions until the commander accepts them.\n"
+    },
+    "transcript": [
+      {
+        "speakerName": "Commander (simulated)",
+        "text": "This is a simulated retrospective, not an actual Jamie recording. We are grounding it in the implemented code and scenario definitions because there are no saved incident-investigator results to quote. We need a clear account of the connection-exhaustion drill, the changes we made, and what still needs a live rehearsal."
+      },
+      {
+        "speakerName": "Logs investigator (simulated)",
+        "text": "In the first scenario, payments-api reports timeout acquiring connection from pool with max five, and checkout-api reports upstream payments timeouts. The modeled change reduced the connection allowance from fifty to five. External payment-provider probes remain healthy in this scenario. Those are the distinct signatures the investigation should record."
+      },
+      {
+        "speakerName": "Changes investigator (simulated)",
+        "text": "On a fresh simulator the relevant change is deploy 482: DB_POOL_MAX goes from fifty to five and payment retries increase. That diff is consistent with the local timeout signature. The CDN change and older search warnings are alternate leads to rule out. We must avoid recommending a rollback only because a change happened recently."
+      },
+      {
+        "speakerName": "Metrics investigator (simulated)",
+        "text": "The simulator models the affected payments path with high checkout errors and latency, a five-connection ceiling, and short-lived relief after a restart. Rolling back the causal change produces a recovery over about forty-five seconds. These are deterministic scenario mechanics, not measurements from a production deployment."
+      },
+      {
+        "speakerName": "Commander (simulated)",
+        "text": "The old final proposal shortcut undermined that investigation because it read the simulator culprit directly. That shortcut has been replaced. The separate evidence review receives numbered findings and visible deploy records, and can return either a cited rollback or a specific request for more information."
+      },
+      {
+        "speakerName": "Changes investigator (simulated)",
+        "text": "The boundary validates the response before it becomes a proposal: the deploy must be available, the finding references must exist, and a rollback cannot carry unresolved evidence gaps. Approval also checks the incident and evidence are still current. These checks prevent malformed or stale actions; they cannot certify a model interpretation as true."
+      },
+      {
+        "speakerName": "Metrics investigator (simulated)",
+        "text": "The provider counterexample is now implemented. External payment-provider health probes return 503 while the local database stays healthy. An unrelated local rollback or payments restart does not restore the provider. The expected recommendation is to avoid a local rollback, confirm provider status and consider a supported failover. We still need to observe that behavior from the live model."
+      },
+      {
+        "speakerName": "Logs investigator (simulated)",
+        "text": "The review lifecycle also handles interruption. Duplicate timer ticks do not duplicate calls, new evidence supersedes old work, and cancelled replies cannot overwrite the current state. The screen explains when evidence is missing or a call failed, with a retry instead of a hidden answer fallback."
+      },
+      {
+        "speakerName": "Comms investigator (simulated)",
+        "text": "I would describe the router as five samples from the same model, with at least three matching for an action under the defaults. I would not call the votes statistically independent or call agreement a probability of correctness. Customer updates should report observed impact and approved mitigation, with uncertainty stated plainly."
+      },
+      {
+        "speakerName": "Commander (simulated)",
+        "text": "The previous local check passed ninety-five tests, the type checker and the production build, with the existing bundle-size warning. The two-minute storyboard and architecture documentation are written. Live model and voice rehearsal, actual Jamie data and recording the submission video remain pending."
+      },
+      {
+        "speakerName": "Comms investigator (simulated)",
+        "text": "For this fixture, keep three document follow-ups open and the completed implementation work marked done. Each open request should include enough context to stand alone. We should not imply that accepting them changes Shopfront production or completes anything inside Jamie."
+      },
+      {
+        "speakerName": "Commander (simulated)",
+        "text": "Agreed. The webhook should attach these simulated notes and propose the three incomplete tasks. Nothing starts until I accept the proposal. We will check the outputs before marking the resulting work done, and keep the simulated-source label visible in the presentation."
+      }
+    ],
+    "participants": [
+      {
+        "name": "Commander (simulated)",
+        "email": null
+      },
+      {
+        "name": "Logs investigator (simulated)",
+        "email": null
+      },
+      {
+        "name": "Changes investigator (simulated)",
+        "email": null
+      },
+      {
+        "name": "Metrics investigator (simulated)",
+        "email": null
+      },
+      {
+        "name": "Comms investigator (simulated)",
+        "email": null
+      }
+    ],
+    "tasks": [
+      {
+        "content": "Replace the final known-culprit fallback with a findings-based recommendation that returns a cited rollback or concrete missing evidence.",
+        "completed": true,
+        "assignee": {
+          "name": "Changes investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Validate deploy availability and finding references, and reject stale approvals or late superseded recommendations.",
+        "completed": true,
+        "assignee": {
+          "name": "Changes investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Add the external payment-provider outage scenario, healthy local database evidence and explicit simulated provider recovery.",
+        "completed": true,
+        "assignee": {
+          "name": "Metrics investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Expose recommendation loading, insufficient-evidence and retry states, with numbered findings in the incident interface.",
+        "completed": true,
+        "assignee": {
+          "name": "Logs investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Correct same-model vote-agreement wording and the requested-vote denominator; prepare architecture, technology documentation and the two-minute storyboard.",
+        "completed": true,
+        "assignee": {
+          "name": "Comms investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Write outputs/incident-evidence-checklist.md for the simulated checkout incident. Explain the local connection-exhaustion signature versus external payment-provider 503s with a healthy local database. Separate observations, inferred cause, missing evidence and the human authorization needed before a rollback. Include how to confirm recovery and why valid finding citations alone do not prove a model conclusion. Use these stated scenario mechanics; do not invent live execution results. Produce a standalone document only.",
+        "completed": false,
+        "assignee": {
+          "name": "Commander (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Prepare outputs/jury-questions.md with concise answers about Control Tower: production is simulated; the final known-culprit shortcut was replaced by a findings-only recommendation; initial change suspicion is time correlation; at least three of five same-model votes must agree by default; risky actions need human permission. Explain that this meeting is a hand-authored fixture, and live model/voice rehearsal and the submission video remain pending. Produce a standalone document only.",
+        "completed": false,
+        "assignee": {
+          "name": "Comms investigator (simulated)",
+          "email": null
+        }
+      },
+      {
+        "content": "Draft outputs/partner-demo-guide.md explaining the simulated Jamie meeting flow: a meeting.completed JSON reaches /webhooks/jamie, notes attach to the loaded incident, only incomplete meeting items become a proposal, acceptance starts one agent per item, and successful outputs wait for a human to mark the work done. Explain how a real recorded Jamie conversation could later replace the fixture. State that this replay does not demonstrate a live Jamie request or synchronize completion to Jamie. Produce a standalone document only.",
+        "completed": false,
+        "assignee": {
+          "name": "Metrics investigator (simulated)",
+          "email": null
+        }
+      }
+    ]
+  }
+}

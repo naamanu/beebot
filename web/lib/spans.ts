@@ -26,6 +26,7 @@ export const INTENT_STYLE: Record<Intent, { bar: string; text: string; dot: stri
   approve: { bar: "bg-span-tool", text: "text-span-tool", dot: "bg-span-tool" },
   rule: { bar: "bg-span-chat", text: "text-span-chat", dot: "bg-span-chat" },
   incident: { bar: "bg-span-agent", text: "text-span-agent", dot: "bg-span-agent" },
+  report: { bar: "bg-span-retrieval", text: "text-span-retrieval", dot: "bg-span-retrieval" },
   chatter: { bar: "bg-muted-foreground/50", text: "text-muted-foreground", dot: "bg-muted-foreground" },
 };
 

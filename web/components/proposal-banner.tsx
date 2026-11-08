@@ -1,5 +1,6 @@
 import { Lightbulb, Play, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { navigate } from "@/hooks/use-route";
 import { useTower } from "@/lib/store";
 
 // Work the tower suggested on its own, e.g. action items from a review call.
@@ -25,7 +26,9 @@ export function ProposalBanner() {
         </p>
       </div>
       <div className="flex shrink-0 gap-2">
-        <Button size="sm" disabled={!connected} onClick={() => send({ type: "accept_proposal", id: p.id })}>
+        <Button size="sm" disabled={!connected} onClick={() => {
+          if (send({ type: "accept_proposal", id: p.id }) && !p.action) navigate("/");
+        }}>
           <Play data-icon="inline-start" /> {p.action ? "Approve" : `Start ${p.items.length} task${p.items.length === 1 ? "" : "s"}`}
         </Button>
         <Button size="sm" variant="ghost" disabled={!connected} onClick={() => send({ type: "dismiss_proposal", id: p.id })} aria-label="Dismiss">

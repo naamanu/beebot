@@ -42,6 +42,9 @@ export function incidentBriefing(incident: IncidentView, agents: AgentView[], pr
 
 // The last word when an incident closes.
 export function closingBriefing(incident: IncidentView): string {
+  if (incident.skippedInvestigation) {
+    return `Investigation closed with ${incident.skippedInvestigation.openQuestions.length} open checks saved for follow-up. ${incident.skippedInvestigation.demoRecoveryAt !== undefined ? "Demo services have been reset to healthy." : incident.skippedInvestigation.recoveryConfirmed ? "Recovery was confirmed." : "Recovery has not been confirmed."} I'm generating the postmortem.`;
+  }
   const minutes = Math.max(1, Math.round(((incident.mitigatedAt ?? Date.now()) - incident.impactAt) / 60_000));
   const posts = incident.statusPosts.length;
   return `Incident closed. Customers were affected for about ${minutes} minute${minutes === 1 ? "" : "s"}; ${incident.findings.length} findings recorded${posts ? ` and ${posts} status update${posts === 1 ? "" : "s"} posted` : ""}. The postmortem is ready to generate.`;

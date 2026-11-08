@@ -4,11 +4,11 @@ import { z } from "zod";
 import { estimateCost } from "./pricing.ts";
 import type { AgentView, IncidentAction, IncidentView, Intent, MissionView, RouteVerdict } from "./types.ts";
 
-// The decision engine. Every spoken turn is classified by N independent
-// votes; the share of votes that agree is the confidence. High confidence
-// acts immediately, low confidence asks the operator.
+// The decision engine samples N votes from the same model. Agreement gates
+// routing; it is not a calibrated probability of correctness. With the default
+// settings, 3 of 5 matching votes act; otherwise the tower asks the operator.
 
-const INTENTS = ["assign", "stop", "correct", "approve", "rule", "incident", "chatter"] as const;
+const INTENTS = ["assign", "stop", "correct", "approve", "rule", "incident", "report", "chatter"] as const;
 const INCIDENT_ACTIONS = ["none", "declare", "identified", "mitigated", "resolved", "stand_down"] as const;
 
 export interface RouterContext {
@@ -37,6 +37,27 @@ export class Router {
     private ignoreThreshold = 0.8,
   ) {
     if (!Number.isInteger(votes) || votes < 1 || votes > 9) throw new Error("ROUTER_VOTES must be an integer between 1 and 9.");
+  }
+
+  // A spoken answer to "what are you doing?", from the agents' recent activity.
+  async report(question: string, agents: AgentView[], signal?: AbortSignal): Promise<string> {
+    if (!agents.length) return "No agents are working right now.";
+    try {
+      const res = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 300,
+        output_config: { effort: "low" },
+        messages: [{
+          role: "user",
+          content: `The operator asked: "${question}"\n\n<agents>\n${agentsBlock(agents, 8)}\n</agents>\n\nAnswer out loud for the operator in at most two short sentences per agent, and under 50 words in total. Name each agent by its role (or "agent <id>" if it has none). Say what it is doing or found, plainly. No markdown, no lists.`,
+        }],
+      }, { signal, timeout: 15_000, maxRetries: 0 });
+      const text = res.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join(" ").trim();
+      if (text) return text;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+    return plainReport(agents);
   }
 
   // One quick vote: what the command bar shows while you type.
@@ -122,6 +143,7 @@ export class Router {
       instruction: winner.instruction,
       incidentAction: winner.incidentAction,
       confidence,
+      requestedVotes: votes,
       votes: ranked.map(({ target, intent, count, incidentAction }) => ({ target, intent, count, incidentAction })),
       action,
       ms: Date.now() - started,
@@ -153,6 +175,7 @@ export function clarifyingQuestion(v: RouteVerdict, agents: AgentView[]): string
       correct: "change course",
       approve: "approve and ship",
       rule: "add a standing rule",
+      report: "report back",
       chatter: "ignore that",
     };
     return `Should ${label(a.target)} ${verb[a.intent]}, or ${verb[b.intent]}?`;
@@ -177,16 +200,30 @@ function incidentBlock(incident: IncidentView | null | undefined): string {
   return `\n<incident>Active ${incident.severity} incident "${incident.title}", status ${incident.status}.</incident>\n`;
 }
 
-function buildPrompt(utterance: string, ctx: RouterContext): string {
-  const agents = ctx.agents
+function agentsBlock(agents: AgentView[], events = 4): string {
+  return agents
     .map((a) => {
       const recent = a.events
-        .slice(-4)
+        .slice(-events)
         .map((e) => `    - ${e.kind}: ${e.text.slice(0, 160)}`)
         .join("\n");
       return `Agent ${a.id}${a.role ? ` [${a.role}]` : ""} (${a.status})\n  Task: ${a.task}\n  Recent activity:\n${recent || "    - (none yet)"}`;
     })
     .join("\n\n");
+}
+
+// When the model can't be reached: status and the latest thing each agent did.
+export function plainReport(agents: AgentView[]): string {
+  return agents
+    .map((a) => {
+      const last = a.events.at(-1);
+      return `${a.role || `Agent ${a.id}`} is ${a.status}${last ? `; latest: ${last.text.slice(0, 80)}` : ""}.`;
+    })
+    .join(" ");
+}
+
+function buildPrompt(utterance: string, ctx: RouterContext): string {
+  const agents = agentsBlock(ctx.agents);
 
   return `You route a human operator's spoken words to the coding agents they are supervising. The text comes from live speech-to-text or a typed command bar, so expect transcription errors ("to" may be agent "two", "for" may be "four", "won" may be "one").
 
@@ -236,6 +273,7 @@ Decide:
   - approve: the work is good, ship it. Also: saying yes to an agent that is waiting for approval ("approve", "do it", "go ahead", "yes, roll it back").
   - rule: a lasting constraint that should apply to every agent from now on ("never…", "always…", "no new dependencies"). Rules always target "all".
   - incident: about the incident itself, not one agent. Target "all". Set incident_action: "declare" to start an incident (instruction = a short title, e.g. "Checkout failing"), or "identified", "mitigated", "resolved" when the commander states that status, or "stand_down" when they call it off as a false alarm ("stand down", "false alarm, cancel the incident").
+  - report: asking what an agent is doing, how it is going, or what it found ("logs, what are you seeing?", "agent two, status?", "how's whoever is on metrics doing?"). Target that agent, or "all" for everyone ("status from everyone", "where are we?"). The agent is not interrupted; the tower answers out loud.
   - chatter: talking to someone else, thinking aloud, or filler. Never use chatter for something phrased as an instruction to an agent ("make it…", "change that…").
 - If it is an instruction but you cannot tell which agent it is for, or what it asks for, set target to "unclear". Do not guess: the operator will be asked. Before choosing "unclear", check for a spoken agent number, including mis-transcriptions: a leading "to"/"too" is agent two, "for" is four, "won" is one, "tree"/"free" is three. "to stop" means "two, stop".
 - instruction: a clear directive the agent can act on without hearing the original speech.

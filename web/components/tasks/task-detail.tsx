@@ -14,6 +14,7 @@ import { navigate } from "@/hooks/use-route";
 import { formatCost } from "@/lib/format";
 import { STATUS_STYLE, agentName, currentAction, formatDuration } from "@/lib/spans";
 import { useTower } from "@/lib/store";
+import { RecommendationPanel } from "@/components/incident/recommendation-panel";
 import { cn } from "@/lib/utils";
 import { TaskStatusLabel } from "./task-status";
 import { LiveAgentCard } from "./live-agent-card";
@@ -172,12 +173,13 @@ function TaskStory({ task, embedded }: { task: TaskView; embedded: boolean }) {
       <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
         <div className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-5 sm:px-6">
           {task.kind === "incident" && incident && <IncidentBar incident={incident} minimal={embedded} />}
+          {task.kind === "incident" && incident && <RecommendationPanel incident={incident} />}
 
           {task.status === "ready" && task.kind === "incident" && incident && incident.fixAppliedAt === null && (
             // Investigators done but customers still failing: never suggest closing it.
             <div role="status" className="rounded-xl border border-span-http/40 bg-span-http/5 p-4 text-sm">
               <p className="font-medium">The investigators have finished, but checkout errors are still high.</p>
-              <p className="mt-1 text-muted-foreground">The tower has proposed a fix above. Approve it, or tell the investigators what to do next.</p>
+              <p className="mt-1 text-muted-foreground">Review the evidence assessment and any pending approvals, or tell an investigator what to check next.</p>
             </div>
           )}
           {task.status === "ready" && !(task.kind === "incident" && incident && incident.fixAppliedAt === null) && (

@@ -11,6 +11,7 @@ import { Agent, type AgentSnapshot } from "./agents.ts";
 import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
 import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
 import { writePostmortem } from "./incident/postmortem.ts";
+import { reviewEvidence } from "./incident/recommendation.ts";
 import { ShopfrontSim } from "./incident/sim.ts";
 import { Watchtower, anomalyBriefing, type Anomaly } from "./watch/watchtower.ts";
 import { closingBriefing, incidentBriefing, type BriefingState } from "./watch/briefing.ts";
@@ -425,21 +426,38 @@ function onAnomaly(a: Anomaly): void {
 
 // Action items from a review call become suggested work: the tower offers,
 // the commander decides.
-function proposeFollowUps(notes: JamieMeeting | null): void {
+function proposeFollowUps(notes: JamieMeeting | null): number {
   const items = (notes?.tasks ?? []).filter((t) => !t.completed).map((t) => (t.assignee?.name ? `${t.content} (owner: ${t.assignee.name})` : t.content));
-  if (!items.length) return;
+  if (!items.length) {
+    broadcast({ type: "notice", level: "info", text: "Jamie notes attached, but no unfinished action items were supplied. Add tasks in Jamie and attach the meeting again to propose follow-ups." });
+    return 0;
+  }
   const proposal: Proposal = { id: randomUUID().slice(0, 8), source: "jamie", title: `Follow-ups from “${notes!.title}”`, items, createdAt: Date.now(), status: "open" };
   proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
   broadcast(state());
   broadcast({ type: "speak", text: `Jamie sent ${items.length} action item${items.length === 1 ? "" : "s"} from the review. Want agents on ${items.length === 1 ? "it" : "them"}? Say “start the follow-ups”.` });
   save();
+  return items.length;
 }
 
 function acceptProposal(id: string | null): void {
   const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
   if (!p) return;
-  p.status = "accepted";
   if (p.action?.type === "rollback") {
+    // Recheck the evidence and target when a delayed voice approval arrives.
+    const current = incident;
+    const deployId = p.action.deployId;
+    const target = production.deploys.find((d) => d.id === deployId);
+    if (!current || current.id !== p.incidentId || current.status === "resolved" ||
+      !current.review.matches(reviewEvidence(current.findings, production.deploys)) ||
+      current.review.view.decision?.action !== "rollback" || current.review.view.decision.deployId !== deployId ||
+      incidentInvestigatorsBusy() || !target || target.rolledBackAt !== null || target.at > Date.now() || current.sim.fixedAt !== null) {
+      p.status = "dismissed";
+      broadcast(state());
+      broadcast({ type: "notice", level: "error", text: "That recommendation is no longer current. Review the latest findings before approving a fix." });
+      return;
+    }
+    p.status = "accepted";
     const result = production.rollback(p.action.deployId);
     incident?.log("approval", `Approved: roll back deploy #${p.action.deployId}`, "commander");
     incident?.log("action", result, "tower");
@@ -448,6 +466,7 @@ function acceptProposal(id: string | null): void {
     save();
     return;
   }
+  p.status = "accepted";
   // Code-shaped items get a coding agent; the rest a general one.
   for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true, followUp: true });
   broadcast(state());
@@ -498,30 +517,63 @@ function standDown(by: string): void {
   broadcast({ type: "speak", text: "Standing down. I'll keep watching production." });
 }
 
-// The investigators finished but nothing fixed it: the tower proposes the
-// rollback of the suspect deploy itself, once, and waits for a yes.
+function incidentInvestigatorsBusy(): boolean {
+  return agents.some((a) => a.template === "incident" && (a.status === "working" || a.status === "starting" || a.status === "blocked" || a.approval));
+}
+
+function dismissIncidentFixes(incidentId: string): boolean {
+  let changed = false;
+  for (const p of proposals) if (p.incidentId === incidentId && p.status === "open") { p.status = "dismissed"; changed = true; }
+  return changed;
+}
+
+// Review recorded findings and visible deploy records after investigators stop.
+// Remaining errors alone never justify a rollback.
 function maybeProposeFix(): void {
-  if (!incident || incident.status === "resolved" || !production.broken) return;
-  const suspect = production.badDeploy!;
+  const current = incident;
+  if (!current || current.status === "resolved") return;
   const investigators = agents.filter((a) => a.template === "incident");
-  const busy = investigators.some((a) => a.status === "working" || a.status === "starting" || a.status === "blocked" || a.approval);
-  if (!investigators.length || busy) return;
-  if (proposals.some((p) => p.action?.type === "rollback" && p.action.deployId === suspect.id && p.status !== "dismissed")) return;
-  const proposal: Proposal = {
-    id: randomUUID().slice(0, 8),
-    source: "tower",
-    title: `Roll back deploy #${suspect.id}?`,
-    items: [`Roll back deploy #${suspect.id} to ${suspect.service} (“${suspect.message}”, by ${suspect.author})`],
-    createdAt: Date.now(),
-    status: "open",
-    action: { type: "rollback", deployId: suspect.id },
-  };
-  proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
-  incident.log("approval", `Proposed: roll back deploy #${suspect.id}`, "tower");
+  if (!investigators.length || incidentInvestigatorsBusy() || current.sim.fixedAt !== null || isRecovered(current.view())) {
+    const hadReview = current.review.view.state !== "none";
+    current.review.invalidate();
+    if (dismissIncidentFixes(current.id) || hadReview) broadcast(state());
+    return;
+  }
+  const evidence = reviewEvidence(current.findings, production.deploys);
+  if (current.review.matches(evidence)) return;
+  dismissIncidentFixes(current.id);
+  const work = current.review.run(evidence);
   broadcast(state());
-  broadcast({
-    type: "speak",
-    text: `All ${investigators.length} investigators have finished, and the most likely cause is deploy ${suspect.id} to ${suspect.service}. Roll it back? Say “approve”.`,
+  void work.then((decision) => {
+    if (incident !== current || current.status === "resolved") return;
+    if (incidentInvestigatorsBusy() || current.sim.fixedAt !== null || isRecovered(current.view()) || !current.review.matches(reviewEvidence(current.findings, production.deploys))) {
+      current.review.invalidate();
+      broadcast(state());
+      return;
+    }
+    if (!decision) {
+      broadcast(state());
+      if (current.review.view.state === "error") {
+        current.log("recommendation", `Evidence review failed: ${current.review.view.error}. No fix proposed.`, "tower");
+        broadcast({ type: "notice", level: "error", text: "The evidence review failed. No fix was proposed. Retry it from the incident view." });
+      }
+      return;
+    }
+    const citations = decision.findingIds.map((id) => `Finding ${id}: ${evidence.findings.find((f) => f.id === id)!.text}`);
+    current.log("recommendation", `${decision.action === "rollback" ? `Recommend rolling back #${decision.deployId}` : "Further investigation needed"}: ${decision.reason}${citations.length ? `\n${citations.join("\n")}` : ""}${decision.missingEvidence.length ? `\nNext checks: ${decision.missingEvidence.join("; ")}` : ""}`, "tower");
+    if (decision.action === "rollback") {
+      const proposal: Proposal = {
+        id: randomUUID().slice(0, 8), source: "tower", incidentId: current.id,
+        title: `Roll back deploy #${decision.deployId}?`,
+        items: [decision.reason, ...citations], createdAt: Date.now(), status: "open",
+        action: { type: "rollback", deployId: decision.deployId! },
+      };
+      proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
+      broadcast({ type: "speak", text: `The recorded findings support rolling back deploy ${decision.deployId}. ${decision.reason} Approve?` });
+    } else {
+      broadcast({ type: "speak", text: `I don't have evidence for a rollback. ${decision.reason} Next: ${decision.missingEvidence.join("; ")}` });
+    }
+    broadcast(state());
   });
 }
 
@@ -548,6 +600,9 @@ function setIncidentStatus(status: IncidentStatus, by: string): void {
   incident.setStatus(status, by);
   if (status === "resolved") {
     clearInterval(incidentTimer);
+    incident.review.invalidate();
+    dismissIncidentFixes(incident.id);
+    broadcast(state());
     const stoodDown = /Stood down/.test(incident.timeline.at(-2)?.text ?? "");
     if (wasOpen && !stoodDown) {
       broadcast({ type: "speak", text: closingBriefing(incident.view()) });
@@ -560,6 +615,8 @@ function setIncidentStatus(status: IncidentStatus, by: string): void {
 
 function endIncident(): void {
   clearInterval(incidentTimer);
+  incident?.review.invalidate();
+  if (incident) dismissIncidentFixes(incident.id);
   incident = null;
   callNotes = null;
 }
@@ -690,6 +747,15 @@ async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): P
     if (v.intent === "approve") decidePlan(missionId, "approve");
     else if (v.intent === "stop") decidePlan(missionId, "cancel");
     else decidePlan(missionId, "revise", v.instruction || v.utterance);
+    return;
+  }
+  // A question about the work: answer out loud, leave the agents alone.
+  if (v.intent === "report") {
+    // No single agent named (or "new"/"none"): report on everyone in view.
+    const named = scoped.filter((a) => a.id === v.target);
+    const asked = named.length ? named : scoped;
+    const text = await router.report(v.utterance, asked.map((a) => a.view()), signal);
+    if (!signal.aborted) broadcast({ type: "speak", text });
     return;
   }
   incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
@@ -954,11 +1020,40 @@ wss.on("connection", (ws) => {
         broadcast({ type: "speak", text: msg.on ? "Watching production." : "I've stopped watching production." });
         break;
       case "simulate_outage":
-        // Demo: a bad deploy lands on the healthy store; the watchtower should notice.
         if (!production.broken) {
-          const { badDeployId } = production.injectOutage();
-          broadcast({ type: "notice", level: "info", text: `Simulated: deploy #${badDeployId} just landed on payments-api.` });
+          if (incident && incident.status !== "resolved") throw new HttpError(409, "Resolve or stand down the current incident before starting another drill.");
+          if (msg.scenario === "provider") {
+            production.injectProviderOutage();
+            broadcast({ type: "notice", level: "info", text: "Simulated: the external payment provider is returning 503s. No local deploy caused this outage." });
+          } else {
+            const { badDeployId } = production.injectOutage();
+            broadcast({ type: "notice", level: "info", text: `Simulated: deploy #${badDeployId} just landed on payments-api.` });
+          }
         }
+        break;
+      case "recover_provider":
+        if (production.recoverProvider()) {
+          incident?.log("action", "Demo: the external payment provider has restored service. No local rollback was applied.", "simulator");
+          broadcastIncident();
+          broadcast({ type: "notice", level: "info", text: "Simulated provider recovery. Checkout errors will fall over about 45 seconds." });
+        } else throw new HttpError(409, "There is no active provider outage to recover.");
+        break;
+      case "retry_recommendation":
+        if (!incident || incident.status === "resolved" || incident.review.view.state === "reviewing") break;
+        incident.review.invalidate();
+        dismissIncidentFixes(incident.id);
+        maybeProposeFix();
+        break;
+      case "skip_investigation":
+        if (!incident || incident.id !== msg.incidentId) throw new HttpError(409, "That incident is no longer current.");
+        if (incident.status === "resolved") break;
+        if (incidentInvestigatorsBusy()) throw new HttpError(409, "Let the investigators finish or stop them before skipping further checks.");
+        incident.skipInvestigation("commander");
+        // The explicit demo reset is immediate; refresh health and re-arm the
+        // watchtower now so the UI and next drill don't wait for the next tick.
+        watchtower.check();
+        broadcast({ type: "watch", watch: watchtower.view() });
+        setIncidentStatus("resolved", "commander");
         break;
       case "stand_down":
         standDown("commander");
@@ -1113,8 +1208,8 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
     callNotes = notes;
     current.jamieMeetingId = meetingId;
     current.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
-    proposeFollowUps(callNotes);
-    return json(200, { title: callNotes.title });
+    const followUpCount = proposeFollowUps(callNotes);
+    return json(200, { title: callNotes.title, followUpCount });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "GET") {
     return json(200, { markdown: incident.postmortem });

@@ -1,0 +1,26 @@
+{
+  "name": "control-tower-video",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "record": "node scripts/record.mjs",
+    "studio": "remotion studio src/index.ts",
+    "render:github": "remotion render src/index.ts GithubTour out/control-tower-tour.mp4",
+    "render:tweet": "remotion render src/index.ts TweetCut out/control-tower-tweet.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.541",
+    "@remotion/fonts": "^4.0.541",
+    "@remotion/transitions": "^4.0.541",
+    "lucide-react": "^1.70.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "remotion": "^4.0.541"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "puppeteer-core": "^25.16.0",
+    "typescript": "^7.0.2"
+  }
+}

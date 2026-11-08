@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { plainReport } from "../server/router.ts";
 import { buildTasks } from "../server/tasks.ts";
 import { plainIncidentStatus } from "../web/lib/incident-status.ts";
 import type { AgentView, IncidentView, MissionView } from "../server/types.ts";
@@ -29,4 +30,9 @@ test("follow-ups from a review call stay marked as follow-ups", () => {
   const [followUp, own] = buildTasks([], [{ ...base, followUp: true }, { ...base, id: "n", createdAt: 0 }], null);
   assert.equal(followUp!.followUp, true);
   assert.equal(own!.followUp, false, "missions saved before the flag existed are not follow-ups");
+});
+
+test("a report without the model still says what each agent is doing", () => {
+  const logs = { ...agent(false), role: "Logs", events: [{ kind: "finding", text: "Pool timeouts on payments-api since 14:38", at: 1 }] } as unknown as AgentView;
+  assert.equal(plainReport([logs]), "Logs is working; latest: Pool timeouts on payments-api since 14:38.");
 });

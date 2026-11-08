@@ -26,6 +26,16 @@ test("an incident with an investigator still active keeps working", () => {
   assert.equal(task!.status, "working");
 });
 
+test("finished investigators with insufficient evidence ask for next checks, not an invented pending fix", () => {
+  const current = incident([37, 36, 35]);
+  current.recommendation = { state: "ready", costUsd: 0.02, error: null, decision: {
+    action: "investigate", deployId: null, reason: "The provider is failing; no causal local change is recorded.", findingIds: [], missingEvidence: ["Check provider status."],
+  } };
+  const [task] = buildTasks([investigator("1", "idle")], [], current);
+  assert.equal(task!.needs[0]?.label, "More evidence needed: review the next checks");
+  assert.ok(Math.abs(task!.costUsd - 0.12) < 1e-9);
+});
+
 test("recovery needs the last few samples near baseline, not one dip", () => {
   assert.equal(isRecovered(incident([37, 36, 0.5, 35])), false);
   assert.equal(isRecovered(incident([37, 0.6, 0.5, 0.4, 0.4])), true);
