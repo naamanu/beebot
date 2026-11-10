@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Incident } from "../server/incident/incident.ts";
 import { Jamie } from "../server/incident/jamie.ts";
 import { ShopfrontSim } from "../server/incident/sim.ts";
+import { SimulatorSource } from "../server/production/simulator.ts";
 import { clientMessageSchema } from "../server/protocol.ts";
 import { closingBriefing } from "../server/watch/briefing.ts";
 import { plainIncidentStatus } from "../web/lib/incident-status.ts";
@@ -13,7 +14,7 @@ process.env.ANTHROPIC_API_KEY = "test-placeholder";
 function providerIncident() {
   const sim = new ShopfrontSim(Date.now(), { outage: false });
   sim.injectProviderOutage(Date.now() - 120_000);
-  const incident = new Incident("Provider outage", "SEV1", new Jamie(undefined), () => {}, sim);
+  const incident = new Incident("Provider outage", "SEV1", new Jamie(undefined), () => {}, new SimulatorSource(sim));
   incident.review.view = { state: "ready", error: null, costUsd: 0, decision: {
     action: "investigate", deployId: null, reason: "The provider is failing; there is no causal local deploy.", findingIds: [],
     missingEvidence: ["Confirm provider status and recovery ETA.", "Check whether a supported failover exists."],
@@ -57,7 +58,7 @@ test("skipped questions are a snapshot, even if the recommendation is changed la
 });
 
 test("skip rejects absent, running and rollback reviews and already-closed investigations", () => {
-  const { incident } = providerIncident();
+  const { sim: providerSim, incident } = providerIncident();
   incident.review.view.state = "reviewing";
   assert.throws(() => incident.skipInvestigation("commander"), /no pending investigation checks/);
   incident.review.view.state = "none";
@@ -68,7 +69,7 @@ test("skip rejects absent, running and rollback reviews and already-closed inves
   incident.status = "resolved";
   assert.throws(() => incident.skipInvestigation("commander"), /already closed/);
   assert.equal(incident.skippedInvestigation, undefined);
-  assert.equal(incident.sim.broken, true, "rejected skips must leave the simulator untouched");
+  assert.equal(providerSim.broken, true, "rejected skips must leave the simulator untouched");
 });
 
 test("skip commands must name the incident whose checks the operator saw", () => {

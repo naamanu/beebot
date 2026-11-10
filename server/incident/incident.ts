@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { IncidentStatus, IncidentView, SkippedInvestigation, TimelineEntry } from "../types.ts";
 import { isRecovered } from "../tasks.ts";
 import { Jamie, SAMPLE_PAST_INCIDENTS } from "./jamie.ts";
-import { SERVICES, ShopfrontSim, type Metric, type Service } from "./sim.ts";
+import { assertMetric, assertService, type ActionResult, type Deploy, type Point, type ProductionSource, type StatusPost } from "../production/source.ts";
 import { FindingsReview } from "./recommendation.ts";
 
 export const MCP_NAME = "shopfront";
@@ -67,38 +67,132 @@ export interface Finding {
   text: string;
 }
 
+// Everything needed to show, resume or write up an incident after a restart.
+export interface IncidentRecord {
+  id: string;
+  title: string;
+  severity: "SEV1" | "SEV2";
+  status: IncidentStatus;
+  declaredAt: number;
+  declaredBy: string;
+  detectedAt: number | null;
+  impactAt: number;
+  fixAppliedAt: number | null;
+  timeline: TimelineEntry[];
+  findings: Finding[];
+  statusPosts: StatusPost[];
+  postmortem: string | null;
+  jamieMeetingId: string | null;
+  skippedInvestigation?: SkippedInvestigation;
+  series: Point[];
+  deploys: Deploy[];
+  source: { id: string; label: string; simulated: boolean };
+}
+
+export interface IncidentOptions {
+  declaredBy?: string;
+  detectedAt?: number | null; // first breaching sample, when the watchtower declared it
+  restore?: IncidentRecord;
+}
+
 export class Incident {
-  readonly id = `inc-${Date.now().toString(36)}`;
-  readonly sim: ShopfrontSim;
+  readonly id: string;
   status: IncidentStatus = "investigating";
   readonly declaredAt: number;
+  readonly declaredBy: string;
+  readonly detectedAt: number | null;
   timeline: TimelineEntry[] = [];
   findings: Finding[] = [];
+  statusPosts: StatusPost[] = [];
   postmortem: string | null = null;
   postmortemState: "none" | "writing" | "ready" | "error" = "none";
   jamieMeetingId: string | null = null;
   readonly review: FindingsReview;
   skippedInvestigation?: SkippedInvestigation;
+  readonly interrupted: boolean;
+  // Polled from the source so views render without waiting on a backend.
+  series: Point[] = [];
+  deploys: Deploy[] = [];
+  private services: string[] = [];
+  private rolledBackAt: number | null = null; // a rollback this incident applied
+  private saved: Pick<IncidentRecord, "impactAt" | "fixAppliedAt"> | null = null;
+  private refreshing: Promise<void> | null = null;
 
-  // sim: the production the watchtower already watches. Without it, a fresh
-  // simulation with the outage already 9 minutes in (the classic drill).
   constructor(
     readonly title: string,
     readonly severity: "SEV1" | "SEV2",
     private jamie: Jamie,
     private onChange: () => void,
-    sim?: ShopfrontSim,
-    readonly declaredBy = "commander",
+    readonly source: ProductionSource,
+    { declaredBy = "commander", detectedAt = null, restore }: IncidentOptions = {},
   ) {
     this.review = new FindingsReview(onChange);
-    this.sim = sim ?? new ShopfrontSim();
+    this.declaredBy = restore?.declaredBy ?? declaredBy;
+    this.detectedAt = restore?.detectedAt ?? detectedAt;
+    this.interrupted = !!restore;
+    if (restore) {
+      this.id = restore.id;
+      this.declaredAt = restore.declaredAt;
+      this.status = restore.status;
+      this.timeline = restore.timeline;
+      this.findings = restore.findings;
+      this.statusPosts = restore.statusPosts;
+      this.postmortem = restore.postmortem;
+      this.postmortemState = restore.postmortem ? "ready" : "none";
+      this.jamieMeetingId = restore.jamieMeetingId;
+      this.skippedInvestigation = restore.skippedInvestigation;
+      this.series = restore.series;
+      this.deploys = restore.deploys;
+      this.saved = { impactAt: restore.impactAt, fixAppliedAt: restore.fixAppliedAt };
+      return;
+    }
+    this.id = `inc-${Date.now().toString(36)}`;
     this.declaredAt = Date.now();
-    this.log("declared", declaredBy === "watchtower" ? `Detected and declared by the watchtower: ${title}` : `Incident declared: ${title}`, declaredBy);
+    this.log("declared", this.declaredBy === "watchtower" ? `Detected and declared by the watchtower: ${title}` : `Incident declared: ${title}`, this.declaredBy);
   }
 
   log(kind: TimelineEntry["kind"], text: string, by: string, at = Date.now()): void {
     this.timeline.push({ at, kind, text, by });
     this.onChange();
+  }
+
+  // Pull the latest health series and deploys. Concurrent calls share one fetch;
+  // a failing backend keeps the last good snapshot.
+  refresh(now = Date.now()): Promise<void> {
+    this.refreshing ??= (async () => {
+      try {
+        const { service, metric } = this.source.health;
+        const [series, deploys, services] = await Promise.all([
+          this.source.series(service, metric, 15, now),
+          this.source.deploys(now),
+          this.source.services(),
+        ]);
+        this.series = series.map((p) => ({ t: p.t, v: Math.round(p.v * 10) / 10 }));
+        // Merge rather than replace: a deploy seen during the incident stays in
+        // its evidence even if the source stops listing it (history window,
+        // or a simulator that restarted). Live data wins for known IDs.
+        const live = new Map(deploys.map((d) => [d.id, d]));
+        this.deploys = [...this.deploys.filter((d) => !live.has(d.id)), ...deploys];
+        this.services = services;
+        this.onChange();
+      } catch (err) {
+        console.warn(`Could not refresh production data from ${this.source.label}: ${(err as Error).message}`);
+      } finally {
+        this.refreshing = null;
+      }
+    })();
+    return this.refreshing;
+  }
+
+  get impactAt(): number {
+    return this.source.impactStartedAt?.() ?? this.saved?.impactAt ?? this.detectedAt ?? this.declaredAt;
+  }
+
+  // When a fix took effect. A source that models remediation (the simulator)
+  // is authoritative; otherwise the rollback this incident applied counts.
+  get fixAppliedAt(): number | null {
+    if (this.source.remediatedAt) return this.source.remediatedAt() ?? this.saved?.fixAppliedAt ?? null;
+    return this.rolledBackAt ?? this.saved?.fixAppliedAt ?? null;
   }
 
   setStatus(status: IncidentStatus, by: string): void {
@@ -107,96 +201,136 @@ export class Incident {
     this.log("status", `Status → ${status}`, by);
   }
 
+  async rollback(deployId: string, by: string): Promise<ActionResult> {
+    const result = await this.source.rollback(deployId.replace("#", ""));
+    if (result.ok) this.rolledBackAt ??= Date.now();
+    this.log("action", result.message, by);
+    void this.refresh();
+    return result;
+  }
+
   skipInvestigation(by: string): void {
     if (this.status === "resolved") throw new Error("This investigation is already closed.");
     const { state, decision } = this.review.view;
     if (state !== "ready" || decision?.action !== "investigate") throw new Error("There are no pending investigation checks to skip.");
     const at = Date.now();
     const recoveryConfirmed = isRecovered(this.view());
-    this.sim.restoreForDemo(at);
+    const demo = this.source.demo;
+    demo?.restore(at);
     this.skippedInvestigation = {
       at, by, reason: decision.reason,
       openQuestions: [...decision.missingEvidence],
       recoveryConfirmed,
-      demoRecoveryAt: at,
+      ...(demo ? { demoRecoveryAt: at } : {}),
     };
-    this.log("action", "Demo reset: simulated services restored to healthy immediately. This was a simulator control, not an agent fix or rollback; the diagnosis and open questions remain unchanged.", "simulator", at);
-    this.log("instruction", `Commander skipped further investigation and closed the investigation with open questions. Simulated customer impact ended with the explicit demo reset.\nAssessment: ${decision.reason}\nDeferred checks:\n${decision.missingEvidence.map((q) => `- ${q}`).join("\n")}`, by, at);
+    if (demo) this.log("action", "Demo reset: simulated services restored to healthy immediately. This was a simulator control, not an agent fix or rollback; the diagnosis and open questions remain unchanged.", "simulator", at);
+    this.log("instruction", `Commander skipped further investigation and closed the investigation with open questions.${demo ? " Simulated customer impact ended with the explicit demo reset." : ""}\nAssessment: ${decision.reason}\nDeferred checks:\n${decision.missingEvidence.map((q) => `- ${q}`).join("\n")}`, by, at);
+    if (demo) void this.refresh();
   }
 
   view(): IncidentView {
-    const now = Date.now();
     return {
       id: this.id,
       title: this.title,
       severity: this.severity,
       status: this.status,
       declaredAt: this.declaredAt,
-      impactAt: this.sim.impactAt,
+      impactAt: this.impactAt,
       mitigatedAt: this.skippedInvestigation?.demoRecoveryAt ?? (this.skippedInvestigation && !this.skippedInvestigation.recoveryConfirmed ? null : this.timeline.find((t) => t.kind === "status" && /mitigated|resolved/.test(t.text))?.at ?? null),
-      errorRate: this.sim.series("checkout-api", "error_rate", 15, now).map((p) => ({ t: p.t, v: Math.round(p.v * 10) / 10 })),
+      errorRate: this.series,
       findings: this.findings,
       timeline: this.timeline,
-      statusPosts: this.sim.statusPosts,
+      statusPosts: this.statusPosts,
       hasPostmortem: !!this.postmortem,
       postmortemState: this.postmortemState,
       jamieMeetingId: this.jamieMeetingId,
       declaredBy: this.declaredBy,
-      fixAppliedAt: this.sim.fixedAt,
+      fixAppliedAt: this.fixAppliedAt,
       recommendation: this.review.view,
       skippedInvestigation: this.skippedInvestigation,
       canSkipInvestigation: this.status !== "resolved" && this.review.view.state === "ready" && this.review.view.decision?.action === "investigate",
+      source: { id: this.source.id, label: this.source.label, simulated: this.source.simulated },
+      healthLabel: this.source.health.label,
+      interrupted: this.interrupted || undefined,
+    };
+  }
+
+  record(): IncidentRecord {
+    return {
+      id: this.id, title: this.title, severity: this.severity, status: this.status,
+      declaredAt: this.declaredAt, declaredBy: this.declaredBy, detectedAt: this.detectedAt,
+      impactAt: this.impactAt, fixAppliedAt: this.fixAppliedAt,
+      timeline: this.timeline, findings: this.findings, statusPosts: this.statusPosts,
+      postmortem: this.postmortem, jamieMeetingId: this.jamieMeetingId,
+      skippedInvestigation: this.skippedInvestigation,
+      series: this.series, deploys: this.deploys,
+      source: { id: this.source.id, label: this.source.label, simulated: this.source.simulated },
     };
   }
 
   // Tools for one agent; add_finding needs to know who is speaking.
   mcpServer(agentId: string, role: string) {
     const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
-    const service = z.enum(SERVICES);
+    const failure = (err: unknown) => ({ ...text((err as Error).message), isError: true });
+    const by = `${role} (agent ${agentId})`;
+    const metricNames = this.source.metrics.map((m) => m.name) as [string, ...string[]];
+    const known = () => (this.services.length ? ` Services: ${this.services.join(", ")}.` : "");
     return createSdkMcpServer({
       name: MCP_NAME,
       version: "1.0.0",
       tools: [
-        tool("list_services", "List Shopfront's production services.", {}, async () => text(SERVICES.join("\n"))),
+        tool("list_services", "List the production services.", {}, async () => {
+          try { return text((await this.source.services()).join("\n")); }
+          catch (err) { return failure(err); }
+        }),
         tool(
           "query_logs",
-          "Read recent log lines from one service, newest last.",
-          { service, since_minutes: z.number().min(1).max(240).default(15), contains: z.string().optional() },
+          `Read recent log lines from one service, newest last.${known()}`,
+          { service: z.string(), since_minutes: z.number().min(1).max(240).default(15), contains: z.string().optional() },
           async ({ service, since_minutes, contains }) => {
-            const lines = this.sim.logs(service as Service, since_minutes, contains);
-            return text(lines.length ? lines.join("\n") : "(no matching log lines)");
+            try {
+              await assertService(this.source, service);
+              const lines = await this.source.logs(service, since_minutes, contains);
+              return text(lines.length ? lines.join("\n") : "(no matching log lines)");
+            } catch (err) { return failure(err); }
           },
         ),
         tool(
           "get_metrics",
-          "Get a metric for one service over a window. Metrics: error_rate (%), p95_latency_ms, rps, db_pool_in_use, cache_hit_ratio (%).",
-          {
-            service,
-            metric: z.enum(["error_rate", "p95_latency_ms", "rps", "db_pool_in_use", "cache_hit_ratio"]),
-            window_minutes: z.number().min(5).max(240).default(30),
-          },
+          `Get a metric for one service over a window. Metrics: ${this.source.metrics.map((m) => m.description).join(", ")}.${known()}`,
+          { service: z.string(), metric: z.enum(metricNames), window_minutes: z.number().min(5).max(240).default(30) },
           async ({ service, metric, window_minutes }) => {
-            const pts = this.sim.series(service as Service, metric as Metric, window_minutes);
-            const step = Math.max(1, Math.floor(pts.length / 20));
-            return text(
-              pts
-                .filter((_, i) => i % step === 0 || i === pts.length - 1)
-                .map((p) => `${new Date(p.t).toISOString().slice(11, 19)}  ${p.v.toFixed(1)}`)
-                .join("\n"),
-            );
+            try {
+              await assertService(this.source, service);
+              assertMetric(this.source, metric);
+              const pts = await this.source.series(service, metric, window_minutes);
+              if (!pts.length) return text("(no data points in this window)");
+              const step = Math.max(1, Math.floor(pts.length / 20));
+              return text(
+                pts
+                  .filter((_, i) => i % step === 0 || i === pts.length - 1)
+                  .map((p) => `${new Date(p.t).toISOString().slice(11, 19)}  ${p.v.toFixed(1)}`)
+                  .join("\n"),
+              );
+            } catch (err) { return failure(err); }
           },
         ),
-        tool("list_deploys", "List recent deploys and config changes, newest first.", {}, async () =>
-          text(
-            this.sim.deploys.filter((d) => d.at <= Date.now())
-              .sort((a, b) => b.at - a.at)
-              .map((d) => `#${d.id}  ${new Date(d.at).toISOString().slice(11, 19)}  ${d.service.padEnd(13)} ${d.author.padEnd(14)} ${d.message}${d.rolledBackAt ? "  (rolled back)" : ""}`)
-              .join("\n"),
-          ),
-        ),
+        tool("list_deploys", "List recent deploys and config changes, newest first.", {}, async () => {
+          try {
+            const deploys = await this.source.deploys();
+            return text(
+              deploys
+                .sort((a, b) => b.at - a.at)
+                .map((d) => `#${d.id}  ${new Date(d.at).toISOString().slice(11, 19)}  ${d.service.padEnd(13)} ${d.author.padEnd(14)} ${d.message}${d.rolledBackAt ? "  (rolled back)" : ""}`)
+                .join("\n") || "(no deploys)",
+            );
+          } catch (err) { return failure(err); }
+        }),
         tool("get_deploy", "Show the diff of one deploy.", { deploy_id: z.string() }, async ({ deploy_id }) => {
-          const d = this.sim.deploys.find((x) => x.id === deploy_id.replace("#", "") && x.at <= Date.now());
-          return text(d ? `#${d.id} ${d.service} by ${d.author}: ${d.message}\n\n${d.diff}` : `No deploy #${deploy_id}`);
+          try {
+            const d = (await this.source.deploys()).find((x) => x.id === deploy_id.replace("#", ""));
+            return text(d ? `#${d.id} ${d.service} by ${d.author}: ${d.message}\n\n${d.diff}` : `No deploy #${deploy_id}`);
+          } catch (err) { return failure(err); }
         }),
         tool(
           "search_past_incidents",
@@ -214,30 +348,36 @@ export class Incident {
         ),
         tool("add_finding", "Record a finding for the whole incident team (one sentence, with evidence).", { finding: z.string() }, async ({ finding }) => {
           this.findings.push({ at: Date.now(), agentId, role, text: finding });
-          this.log("finding", finding, `${role} (agent ${agentId})`);
+          this.log("finding", finding, by);
           return text("Recorded.");
         }),
         tool("read_findings", "Read everything the team has found so far.", {}, async () =>
           text(this.findings.length ? this.findings.map((f) => `[${f.role}] ${f.text}`).join("\n") : "No findings yet."),
         ),
         tool("rollback_deploy", "Roll back a deploy. Requires the incident commander's approval.", { deploy_id: z.string() }, async ({ deploy_id }) => {
-          const result = this.sim.rollback(deploy_id.replace("#", ""));
-          this.log("action", result, `${role} (agent ${agentId})`);
-          return text(result);
+          try { return text((await this.rollback(deploy_id, by)).message); }
+          catch (err) { return failure(err); }
         }),
-        tool("restart_service", "Restart a service's pods. Requires approval.", { service }, async ({ service }) => {
-          const result = this.sim.restart(service as Service);
-          this.log("action", result, `${role} (agent ${agentId})`);
-          return text(result);
+        tool("restart_service", "Restart a service's pods. Requires approval.", { service: z.string() }, async ({ service }) => {
+          try {
+            await assertService(this.source, service);
+            const result = await this.source.restart(service);
+            this.log("action", result.message, by);
+            return text(result.message);
+          } catch (err) { return failure(err); }
         }),
         tool(
           "post_status_update",
           "Post a customer-facing update to the public status page. Requires approval.",
           { status: z.enum(["investigating", "identified", "monitoring", "resolved"]), message: z.string() },
           async ({ status, message }) => {
-            const result = this.sim.postStatus(status, message);
-            this.log("statuspage", `[${status}] ${message}`, `${role} (agent ${agentId})`);
-            return text(result);
+            try {
+              const result = await this.source.postStatus(status, message);
+              if (!result.ok) return { ...text(result.message), isError: true };
+              this.statusPosts.push({ at: Date.now(), status, message });
+              this.log("statuspage", `[${status}] ${message}`, by);
+              return text(result.message);
+            } catch (err) { return failure(err); }
           },
         ),
       ],

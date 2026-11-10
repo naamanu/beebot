@@ -121,15 +121,19 @@ export function TopBar() {
             <DropdownMenuItem onSelect={() => send({ type: "watch_toggle", on: !watch?.enabled })} disabled={!connected}>
               {watch?.enabled ? <EyeOff /> : <Eye />} {watch?.enabled ? "Stop watching production" : "Watch production"}
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => send({ type: "simulate_outage" })} disabled={!connected || watch?.state === "anomaly"}>
-              <Zap /> Simulate a bad deploy (demo)
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => send({ type: "simulate_outage", scenario: "provider" })} disabled={!connected || watch?.state === "anomaly"}>
-              <Zap /> Simulate provider outage (demo)
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => send({ type: "recover_provider" })} disabled={!connected || watch?.state !== "anomaly"}>
-              <Zap /> Simulate provider recovery
-            </DropdownMenuItem>
+            {watch?.source?.demo !== false && (
+              <>
+                <DropdownMenuItem onSelect={() => send({ type: "simulate_outage" })} disabled={!connected || watch?.state === "anomaly"}>
+                  <Zap /> Simulate a bad deploy (demo)
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => send({ type: "simulate_outage", scenario: "provider" })} disabled={!connected || watch?.state === "anomaly"}>
+                  <Zap /> Simulate provider outage (demo)
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => send({ type: "recover_provider" })} disabled={!connected || watch?.state !== "anomaly"}>
+                  <Zap /> Simulate provider recovery
+                </DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuCheckboxItem checked={labs} onCheckedChange={(on) => setLabs(on === true)}>
               Labs: General and Code tasks
@@ -201,16 +205,18 @@ function WatchPill() {
   const watch = useTower((s) => s.watch);
   if (!watch) return null;
   const bad = watch.state === "anomaly";
+  const label = watch.healthLabel ?? "checkout errors";
+  const where = watch.source ? ` on ${watch.source.label}` : "";
   return (
     <span
       className={cn(
         "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 font-mono text-[11px]",
         !watch.enabled ? "border-border text-muted-foreground" : bad ? "border-span-error/50 bg-span-error/10 text-span-error" : "border-border text-foreground",
       )}
-      title={watch.enabled ? `The watchtower checks production every few seconds and acts when checkout errors stay above ${watch.thresholdPct}%` : "The watchtower is off"}
+      title={watch.error ? `Can't reach production${where}: ${watch.error}` : watch.enabled ? `The watchtower checks production${where} every few seconds and acts when ${label} stay above ${watch.thresholdPct}%` : "The watchtower is off"}
     >
       {watch.enabled ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
-      {watch.enabled ? "watching" : "not watching"} · checkout {watch.errorRate.toFixed(1)}%
+      {watch.enabled ? "watching" : "not watching"} · {label.split(" ")[0]} {watch.error ? "no data" : `${watch.errorRate.toFixed(1)}%`}
       <Sparkline points={watch.series.map((p) => p.v)} bad={bad} />
     </span>
   );

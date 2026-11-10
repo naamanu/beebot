@@ -5,5 +5,6 @@ dist
 data/rules.json
 data/session.json
 data/telemetry.db*
+data/incidents.db*
 data/postmortems/
 data/uploads/

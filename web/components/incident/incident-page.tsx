@@ -52,7 +52,9 @@ export function IncidentPage({ task }: { task: TaskView }) {
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-xl leading-tight">{incident.title}</h1>
           <p className="font-mono text-[11.5px] text-muted-foreground">
-            {incident.declaredBy === "watchtower" ? "Noticed by the tower" : "Declared by you"} · {hasUnconfirmedRecovery(incident) ? "investigation closed; recovery unconfirmed" : <>customers affected {formatDuration((incident.mitigatedAt ?? (open ? now : incident.timeline.at(-1)?.at ?? now)) - incident.impactAt)}</>}
+            {incident.declaredBy === "watchtower" ? "Noticed by the tower" : "Declared by you"}
+            {incident.source && <> · {incident.source.label}</>}
+            {incident.interrupted && <> · restored after a restart</>} · {hasUnconfirmedRecovery(incident) ? "investigation closed; recovery unconfirmed" : <>customers affected {formatDuration((incident.mitigatedAt ?? (open ? now : incident.timeline.at(-1)?.at ?? now)) - incident.impactAt)}</>}
           </p>
         </div>
         <span className={cn("inline-flex h-7 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium ring-1", TONE[status.tone])}>

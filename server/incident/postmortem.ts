@@ -11,7 +11,7 @@ const iso = (t: number) => new Date(t).toISOString().slice(11, 19) + "Z";
 export async function writePostmortem(incident: Incident, runs: RunRow[], call: JamieMeeting | null): Promise<string> {
   const v = incident.view();
   const timeline = v.timeline.map((e) => `${iso(e.at)}  [${e.kind}] ${e.by}: ${e.text}`).join("\n");
-  const deploys = incident.sim.deploys.map((d) => `#${d.id} ${iso(d.at)} ${d.service} by ${d.author}: ${d.message}${d.rolledBackAt ? ` (rolled back ${iso(d.rolledBackAt)})` : ""}`).join("\n");
+  const deploys = incident.deploys.map((d) => `#${d.id} ${iso(d.at)} ${d.service} by ${d.author}: ${d.message}${d.rolledBackAt ? ` (rolled back ${iso(d.rolledBackAt)})` : ""}`).join("\n");
   const agentRuns = runs
     .map((r) => `agent-${r.agentId} ${r.status} ${iso(r.startedAt)}-${r.endedAt ? iso(r.endedAt) : "…"}: ${r.task}\n  result: ${(r.result ?? "").slice(0, 600)}`)
     .join("\n");
@@ -42,7 +42,8 @@ Sections, in order:
 ## Action items (a table with Action | Owner | Priority; owners from the call notes where given, otherwise "unassigned")
 
 <incident title="${v.title}" severity="${v.severity}" status="${skipped?.demoRecoveryAt !== undefined ? "resolved by demo reset; open questions retained" : skipped && !skipped.recoveryConfirmed ? "investigation closed; recovery unconfirmed" : v.status}" impact_start="${iso(v.impactAt)}" declared="${iso(v.declaredAt)}" mitigated="${v.mitigatedAt ? iso(v.mitigatedAt) : "not yet"}">
-Peak checkout error rate in the last 15 minutes: ${Math.max(...v.errorRate.map((p) => p.v)).toFixed(1)}%. Current: ${v.errorRate.at(-1)?.v.toFixed(1)}%.
+${v.errorRate.length ? `Peak ${incident.source.health.label} in the last 15 minutes: ${Math.max(...v.errorRate.map((p) => p.v)).toFixed(1)}%. Current: ${v.errorRate.at(-1)!.v.toFixed(1)}%.` : "No health samples were available."}
+Production: ${incident.source.label}.
 </incident>
 
 <timeline>

@@ -6,6 +6,7 @@ import { Agent, type AgentOptions } from "../server/agents.ts";
 import { Telemetry } from "../server/telemetry.ts";
 import { Incident } from "../server/incident/incident.ts";
 import { Jamie } from "../server/incident/jamie.ts";
+import { SimulatorSource } from "../server/production/simulator.ts";
 
 class FakeQuery implements AsyncIterable<SDKMessage> {
   private items: SDKMessage[] = [];
@@ -55,7 +56,7 @@ function setup(t: TestContext, overrides: Partial<AgentOptions> = {}) {
 }
 
 test("every worker enables the idle events required to report completion", (t) => {
-  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {});
+  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {}, new SimulatorSource());
   for (const overrides of [{}, { template: "general" as const }, { incident: { incident, role: "Logs" } }]) {
     const { agent, options } = setup(t, overrides);
     agent.begin();
@@ -65,7 +66,7 @@ test("every worker enables the idle events required to report completion", (t) =
 });
 
 test("incident runs belong to their incident task", (t) => {
-  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {});
+  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {}, new SimulatorSource());
   const { agent, telemetry } = setup(t, { incident: { incident, role: "Logs" } });
   agent.begin();
   assert.equal(telemetry.listRuns({})[0]!.taskId, incident.id);

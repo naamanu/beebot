@@ -111,6 +111,9 @@ export interface IncidentView {
   recommendation?: IncidentRecommendation;
   skippedInvestigation?: SkippedInvestigation;
   canSkipInvestigation?: boolean; // absent on older servers that cannot handle the command
+  source?: { id: string; label: string; simulated: boolean }; // the production backend this incident ran against
+  healthLabel?: string; // what errorRate measures, e.g. "checkout errors"
+  interrupted?: boolean; // restored after a server restart; its investigators did not come back
 }
 
 export type Intent = "assign" | "stop" | "correct" | "approve" | "rule" | "incident" | "report" | "chatter";
@@ -354,6 +357,9 @@ export interface WatchView {
   thresholdPct: number;
   lastCheckAt: number;
   series: { t: number; v: number }[]; // last 10 minutes
+  source?: { id: string; label: string; simulated: boolean; demo: boolean }; // demo: drills are available
+  healthLabel?: string; // what errorRate measures, e.g. "checkout errors"
+  error?: string; // the last check could not reach the backend
 }
 
 // Work the tower suggests on its own, e.g. action items from a review call.
