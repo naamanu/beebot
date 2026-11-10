@@ -4,7 +4,7 @@ Goal: a polished, self-contained demo that a reviewer can run in one command and
 that works the same way against a real (small) production stack as against the
 simulator. Not a hosted multi-tenant SaaS.
 
-## Phase 1 — Foundation (in progress)
+## Phase 1 — Foundation (done)
 
 - [x] **`ProductionSource` interface** (`server/production/source.ts`). Metrics,
       logs, deploys, rollback, restart and status posts are reached only through
@@ -17,9 +17,11 @@ simulator. Not a hosted multi-tenant SaaS.
       `data/incidents.db` (SQLite). An incident open at shutdown comes back
       marked as interrupted (its investigators do not), and resolved incidents
       stay available with their postmortems via `/api/incidents`.
-- [ ] **Split `server/index.ts`.** Move the incident lifecycle (declare, review,
-      briefings, proposals, postmortem) into an `IncidentCommander` with explicit
-      dependencies, leaving `index.ts` as wiring and transport.
+- [x] **Split `server/index.ts`.** The incident lifecycle (watchtower, declare,
+      evidence review, fix and follow-up proposals, briefings, Jamie notes,
+      postmortem, persistence) lives in `IncidentCommander`
+      (`server/incident/commander.ts`) with explicit dependencies and its own
+      tests; `index.ts` keeps agents, missions, routing and transport.
 
 ## Phase 2 — Real backends
 

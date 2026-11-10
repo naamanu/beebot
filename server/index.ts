@@ -8,18 +8,15 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ZodError } from "zod";
 import { ControlAccess } from "./access.ts";
 import { Agent, type AgentSnapshot } from "./agents.ts";
-import { INCIDENT_ROLES, Incident } from "./incident/incident.ts";
+import { IncidentCommander } from "./incident/commander.ts";
+import { INCIDENT_ROLES } from "./incident/incident.ts";
 import { Jamie, type JamieMeeting } from "./incident/jamie.ts";
-import { writePostmortem } from "./incident/postmortem.ts";
-import { reviewEvidence } from "./incident/recommendation.ts";
 import { IncidentStore } from "./incident/store.ts";
 import { createProductionSource } from "./production/index.ts";
-import { Watchtower, anomalyBriefing, type Anomaly } from "./watch/watchtower.ts";
-import { closingBriefing, incidentBriefing, type BriefingState } from "./watch/briefing.ts";
 import { Mission, fallbackTitle, type SpawnRequest } from "./missions/mission.ts";
 import { shortTitle } from "./missions/title.ts";
 import { recoverAgent, recoverMission } from "./missions/recovery.ts";
-import { buildTasks, isRecovered } from "./tasks.ts";
+import { buildTasks } from "./tasks.ts";
 import { OperatorInput } from "./operator.ts";
 import { writeJsonAtomic } from "./persistence.ts";
 import { clientMessageSchema, HttpError, parseJson, previewSchema } from "./protocol.ts";
@@ -27,7 +24,7 @@ import { Reson8Turns } from "./reson8.ts";
 import { Router, clarifyingQuestion } from "./router.ts";
 import { RuleBook } from "./rules.ts";
 import { Telemetry } from "./telemetry.ts";
-import type { Approval, Decision, Proposal, IncidentStatus, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
+import type { Approval, Decision, MissionView, OutputFile, RouteVerdict, RunStatus, ServerMsg, Template, Upload } from "./types.ts";
 import { DEFAULT_TASKS, addScratchDir, addWorktree, createRun, nextAgentId, repoFiles, type Run } from "./workspace.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -60,20 +57,41 @@ let recent: string[] = [];
 let decisions: Decision[] = []; // newest first, so a reloaded page can rebuild its feed
 let pendingClarification: { utterance: string; question: string } | null = null;
 let routing = Promise.resolve(); // utterances are routed one at a time, in order
-// The active incident. Every change is saved to incidents.db; one still open
-// at shutdown comes back (without its investigators) on the next start.
-let incident: Incident | null = null;
-let callNotes: JamieMeeting | null = null; // the war-room call, from Jamie
-let incidentTimer: ReturnType<typeof setInterval> | undefined;
 // Production, watched continuously. The simulator is healthy until a drill lands a bad deploy.
 const production = createProductionSource();
-const watchtower = new Watchtower(production, (a) => onAnomaly(a));
-let lastBriefing: { at: number; state: BriefingState } | null = null;
-let proposals: Proposal[] = [];
 // Planned tasks. Live missions run here; after a restart, earlier ones come
 // back read-only (their agents are restored, the orchestration is not).
 let missions: Mission[] = [];
 let archivedMissions: MissionView[] = [];
+
+// The incident lifecycle, from detection to postmortem. Every change is saved
+// to incidents.db; one still open at shutdown comes back on the next start.
+const commander = new IncidentCommander({
+  production,
+  store: incidents,
+  jamie,
+  dataDir: DATA,
+  broadcast: (msg) => broadcast(msg),
+  changed: () => broadcast(state()),
+  save: () => save(),
+  investigators: () => agents.filter((a) => a.template === "incident"),
+  closeInvestigators: () => {
+    for (const a of agents.filter((x) => x.template === "incident")) a.close("reset");
+    agents = agents.filter((x) => x.template !== "incident");
+  },
+  spawnInvestigators: (title) => {
+    run ??= createRun(WORK, TEMPLATE);
+    for (const role of INCIDENT_ROLES) {
+      const id = nextAgentId(run);
+      const agent = makeAgent(id, `${role.task} Incident: ${title}.`, addScratchDir(run, id), undefined, role.name);
+      agents.push(agent);
+      agent.begin();
+    }
+  },
+  runsSince: (at) => telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= at),
+  // Code-shaped items get a coding agent; the rest a general one.
+  startFollowUp: (item) => { createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true, followUp: true }); },
+});
 
 function broadcast(msg: ServerMsg): void {
   const data = JSON.stringify(msg);
@@ -88,12 +106,12 @@ function tasks() {
   return buildTasks(
     agents.map((a) => a.view()),
     missionViews(),
-    incident?.view() ?? null,
+    commander.view(),
   );
 }
 
 function state(): ServerMsg {
-  return { type: "state", watch: watchtower.view(), proposals: proposals.filter((p) => p.status === "open"), tasks: tasks(), agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: incident?.view() ?? null, missions: missionViews() };
+  return { type: "state", watch: commander.watchView(), proposals: commander.openProposals(), tasks: tasks(), agents: agents.map((a) => a.view()), rules: rules.list(), decisions, incident: commander.view(), missions: missionViews() };
 }
 
 // --- Session persistence: the server can restart without losing agents. ---
@@ -139,7 +157,7 @@ function makeAgent(
   return new Agent({
     mission,
     template: t === "general" ? "general" : "coding",
-    incident: incident && role && !mission ? { incident, role } : undefined,
+    incident: commander.incident && role && !mission ? { incident: commander.incident, role } : undefined,
     onApproval: (agent, approval) => onApproval(agent, approval),
     id,
     task,
@@ -209,9 +227,8 @@ function resetSession(): void {
   for (const a of agents) a.close("reset");
   agents = [];
   missions = [];
-  proposals = [];
   archivedMissions = [];
-  endIncident();
+  commander.reset();
   run = null;
   recent = [];
   decisions = [];
@@ -359,7 +376,7 @@ function completeTask(taskId: string): void {
   if (!task) throw new Error("This task is no longer available.");
   if (task.status === "done") return;
   if (task.status !== "ready") throw new Error("The task is not ready to finish. All required agents must finish and pending approvals must be resolved first.");
-  if (task.kind === "incident") setIncidentStatus("resolved", "commander");
+  if (task.kind === "incident") commander.setStatus("resolved", "commander");
   else {
     const mission = missions.find((candidate) => candidate.id === taskId);
     if (mission) {
@@ -387,318 +404,12 @@ function cancelStart(id: string): void {
   save();
 }
 
-// --- Incidents ---
-
-// Start an incident with four investigators. Other tasks keep running.
-// by "watchtower": declared proactively on the production being watched.
-function declareIncident(title: string, { by = "commander", anomaly = null as Anomaly | null } = {}): void {
-  // Only the previous incident's investigators are replaced.
-  for (const a of agents.filter((x) => x.template === "incident")) a.close("reset");
-  agents = agents.filter((x) => x.template !== "incident");
-  endIncident();
-  // A manual drill on a healthy simulated store gets the classic outage, already 9 minutes in.
-  if (production.demo && !production.demo.broken && by === "commander") production.demo.injectOutage(Date.now() - 9 * 60_000, Date.now() - 6 * 60_000);
-  incident = new Incident(title, "SEV1", jamie, () => broadcastIncident(), production, { declaredBy: by, detectedAt: anomaly?.since ?? null });
-  void incident.refresh();
-  callNotes = null;
-  lastBriefing = null;
-  run ??= createRun(WORK, TEMPLATE);
-  for (const role of INCIDENT_ROLES) {
-    const id = nextAgentId(run);
-    const agent = makeAgent(id, `${role.task} Incident: ${title}.`, addScratchDir(run, id), undefined, role.name);
-    agents.push(agent);
-    agent.begin();
-  }
-  startIncidentTimer();
-  broadcast(state());
-  broadcast({ type: "speak", text: anomaly ? anomalyBriefing(anomaly) : `Incident declared: ${title}. Four investigators are on it.` });
-  save();
-}
-
-// Metrics move continuously; poll production and push to the UI while the incident is open.
-function startIncidentTimer(): void {
-  clearInterval(incidentTimer);
-  incidentTimer = setInterval(() => {
-    const current = incident;
-    if (!current) return;
-    void current.refresh().then(() => {
-      if (incident !== current) return;
-      broadcastIncident();
-      maybeBrief();
-      maybeProposeFix();
-    });
-  }, 2000);
-}
-
-// An incident open when the server stopped comes back for review and
-// write-up. Its investigators and in-flight review do not.
-function restoreIncident(): void {
-  try {
-    const saved = incidents.lastOpen();
-    if (!saved) return;
-    incident = new Incident(saved.title, saved.severity, jamie, () => broadcastIncident(), production, { restore: saved });
-    incident.log("instruction", "Server restarted: this incident was restored from disk. Its investigators did not resume; start new work or resolve it when ready.", "tower");
-    if (saved.source.id !== production.id) incident.log("instruction", `Production source changed from ${saved.source.label} to ${production.label}; live metrics now come from the new source.`, "tower");
-    void incident.refresh();
-    startIncidentTimer();
-    console.log(`Restored open incident ${saved.id}: ${saved.title}`);
-  } catch (err) {
-    console.warn(`Could not restore the last incident: ${(err as Error).message}`);
-  }
-}
-
-// The watchtower saw a sustained spike: act on it unless an incident is open.
-function onAnomaly(a: Anomaly): void {
-  if (incident && incident.status !== "resolved") return;
-  const label = production.health.label;
-  const title = `${label[0]!.toUpperCase()}${label.slice(1)} at ${Math.round(a.errorRate)}%${a.suspect ? ` after deploy #${a.suspect.id}` : ""}`;
-  declareIncident(title, { by: "watchtower", anomaly: a });
-  incident?.log("finding", `Watchtower: ${label} at ${a.errorRate.toFixed(1)}% sustained since ${new Date(a.since).toLocaleTimeString()}${a.suspect ? `; most recent deploy before it: #${a.suspect.id} (${a.suspect.service}, ${a.suspect.author})` : ""}.`, "watchtower");
-}
-
-// Action items from a review call become suggested work: the tower offers,
-// the commander decides.
-function proposeFollowUps(notes: JamieMeeting | null): number {
-  const items = (notes?.tasks ?? []).filter((t) => !t.completed).map((t) => (t.assignee?.name ? `${t.content} (owner: ${t.assignee.name})` : t.content));
-  if (!items.length) {
-    broadcast({ type: "notice", level: "info", text: "Jamie notes attached, but no unfinished action items were supplied. Add tasks in Jamie and attach the meeting again to propose follow-ups." });
-    return 0;
-  }
-  const proposal: Proposal = { id: randomUUID().slice(0, 8), source: "jamie", title: `Follow-ups from “${notes!.title}”`, items, createdAt: Date.now(), status: "open" };
-  proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
-  broadcast(state());
-  broadcast({ type: "speak", text: `Jamie sent ${items.length} action item${items.length === 1 ? "" : "s"} from the review. Want agents on ${items.length === 1 ? "it" : "them"}? Say “start the follow-ups”.` });
-  save();
-  return items.length;
-}
-
-function acceptProposal(id: string | null): void {
-  const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
-  if (!p) return;
-  if (p.action?.type === "rollback") {
-    // Recheck the evidence and target when a delayed voice approval arrives.
-    const current = incident;
-    const deployId = p.action.deployId;
-    const target = current?.deploys.find((d) => d.id === deployId);
-    if (!current || current.id !== p.incidentId || current.status === "resolved" ||
-      !current.review.matches(reviewEvidence(current.findings, current.deploys)) ||
-      current.review.view.decision?.action !== "rollback" || current.review.view.decision.deployId !== deployId ||
-      incidentInvestigatorsBusy() || !target || target.rolledBackAt !== null || target.at > Date.now() || current.fixAppliedAt !== null) {
-      p.status = "dismissed";
-      broadcast(state());
-      broadcast({ type: "notice", level: "error", text: "That recommendation is no longer current. Review the latest findings before approving a fix." });
-      return;
-    }
-    p.status = "accepted";
-    current.log("approval", `Approved: roll back deploy #${deployId}`, "commander");
-    broadcast(state());
-    save();
-    void current.rollback(deployId, "tower").then(
-      (result) => broadcast(result.ok
-        ? { type: "speak", text: `Rolling back deploy ${deployId}. I'll tell you when errors are back to normal.` }
-        : { type: "notice", level: "error", text: `The rollback did not go through: ${result.message}` }),
-      (err) => {
-        current.log("action", `Rollback of #${deployId} failed: ${(err as Error).message}`, "tower");
-        broadcast({ type: "notice", level: "error", text: `The rollback failed: ${(err as Error).message}` });
-      },
-    );
-    return;
-  }
-  p.status = "accepted";
-  // Code-shaped items get a coding agent; the rest a general one.
-  for (const item of p.items) createMission(item, /\b(alert|test|config|code|deploy|review|pool|monitor|dashboard)\b/i.test(item) ? "coding" : "general", [], { quick: true, followUp: true });
-  broadcast(state());
-  broadcast({ type: "speak", text: `Started ${p.items.length} follow-up task${p.items.length === 1 ? "" : "s"}.` });
-  save();
-}
-
-function dismissProposal(id: string | null): void {
-  const p = proposals.find((x) => x.status === "open" && (id === null || x.id === id));
-  if (!p) return;
-  p.status = "dismissed";
-  broadcast(state());
-  save();
-}
-
-// Write the postmortem from the timeline, the agents' runs and any call
-// notes. Runs on resolve by itself; the Postmortem tab can also redo it.
-async function generatePostmortem(current: Incident): Promise<string> {
-  current.postmortemState = "writing";
-  broadcastIncident();
-  try {
-    const runs = telemetry.listRuns({ limit: 100 }).filter((r) => r.startedAt >= current.declaredAt - 5000);
-    const markdown = await writePostmortem(current, runs, callNotes);
-    if (incident !== current) throw new HttpError(409, "The incident changed while the postmortem was being generated.");
-    current.postmortem = markdown;
-    current.postmortemState = "ready";
-    // Incidents live in memory; keep the write-up and its source timeline on disk.
-    const dir = join(DATA, "postmortems");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${current.id}.md`), markdown);
-    writeJsonAtomic(join(dir, `${current.id}.timeline.json`), current.view());
-    return markdown;
-  } catch (err) {
-    current.postmortemState = current.postmortem ? "ready" : "error";
-    throw err;
-  } finally {
-    broadcastIncident();
-  }
-}
-
-// Called off as a false alarm: stop the investigators and close it.
-function standDown(by: string): void {
-  if (!incident || incident.status === "resolved") return;
-  for (const a of agents.filter((x) => x.template === "incident" && x.status === "working")) void a.stop("Stood down by the commander");
-  incident.log("status", "Stood down: called off by the commander", by);
-  setIncidentStatus("resolved", by);
-  watchtower.disarm();
-  broadcast({ type: "speak", text: "Standing down. I'll keep watching production." });
-}
-
-function incidentInvestigatorsBusy(): boolean {
-  return agents.some((a) => a.template === "incident" && (a.status === "working" || a.status === "starting" || a.status === "blocked" || a.approval));
-}
-
-function dismissIncidentFixes(incidentId: string): boolean {
-  let changed = false;
-  for (const p of proposals) if (p.incidentId === incidentId && p.status === "open") { p.status = "dismissed"; changed = true; }
-  return changed;
-}
-
-// Review recorded findings and visible deploy records after investigators stop.
-// Remaining errors alone never justify a rollback.
-function maybeProposeFix(): void {
-  const current = incident;
-  if (!current || current.status === "resolved") return;
-  const investigators = agents.filter((a) => a.template === "incident");
-  if (!investigators.length || incidentInvestigatorsBusy() || current.fixAppliedAt !== null || isRecovered(current.view())) {
-    const hadReview = current.review.view.state !== "none";
-    current.review.invalidate();
-    if (dismissIncidentFixes(current.id) || hadReview) broadcast(state());
-    return;
-  }
-  const evidence = reviewEvidence(current.findings, current.deploys);
-  if (current.review.matches(evidence)) return;
-  dismissIncidentFixes(current.id);
-  const work = current.review.run(evidence);
-  broadcast(state());
-  void work.then((decision) => {
-    if (incident !== current || current.status === "resolved") return;
-    if (incidentInvestigatorsBusy() || current.fixAppliedAt !== null || isRecovered(current.view()) || !current.review.matches(reviewEvidence(current.findings, current.deploys))) {
-      current.review.invalidate();
-      broadcast(state());
-      return;
-    }
-    if (!decision) {
-      broadcast(state());
-      if (current.review.view.state === "error") {
-        current.log("recommendation", `Evidence review failed: ${current.review.view.error}. No fix proposed.`, "tower");
-        broadcast({ type: "notice", level: "error", text: "The evidence review failed. No fix was proposed. Retry it from the incident view." });
-      }
-      return;
-    }
-    const citations = decision.findingIds.map((id) => `Finding ${id}: ${evidence.findings.find((f) => f.id === id)!.text}`);
-    current.log("recommendation", `${decision.action === "rollback" ? `Recommend rolling back #${decision.deployId}` : "Further investigation needed"}: ${decision.reason}${citations.length ? `\n${citations.join("\n")}` : ""}${decision.missingEvidence.length ? `\nNext checks: ${decision.missingEvidence.join("; ")}` : ""}`, "tower");
-    if (decision.action === "rollback") {
-      const proposal: Proposal = {
-        id: randomUUID().slice(0, 8), source: "tower", incidentId: current.id,
-        title: `Roll back deploy #${decision.deployId}?`,
-        items: [decision.reason, ...citations], createdAt: Date.now(), status: "open",
-        action: { type: "rollback", deployId: decision.deployId! },
-      };
-      proposals = [proposal, ...proposals.filter((p) => p.status === "open")].slice(0, 5);
-      broadcast({ type: "speak", text: `The recorded findings support rolling back deploy ${decision.deployId}. ${decision.reason} Approve?` });
-    } else {
-      broadcast({ type: "speak", text: `I don't have evidence for a rollback. ${decision.reason} Next: ${decision.missingEvidence.join("; ")}` });
-    }
-    broadcast(state());
-  });
-}
-
-// A spoken update during an incident, at most every 45 seconds and only
-// when something changed. Approval prompts are spoken separately.
-function maybeBrief(): void {
-  if (!incident || incident.status === "resolved") return;
-  if (lastBriefing && Date.now() - lastBriefing.at < 45_000) return;
-  const view = incident.view();
-  const b = incidentBriefing(view, agents.map((a) => a.view()), lastBriefing?.state ?? null);
-  if (!lastBriefing) {
-    // First call just records the starting point; the declaration was the first briefing.
-    lastBriefing = { at: Date.now(), state: b?.state ?? lastBriefing!.state };
-    return;
-  }
-  if (!b) return;
-  lastBriefing = { at: Date.now(), state: b.state };
-  broadcast({ type: "speak", text: b.text });
-}
-
-function setIncidentStatus(status: IncidentStatus, by: string): void {
-  if (!incident) return;
-  const wasOpen = incident.status !== "resolved";
-  incident.setStatus(status, by);
-  if (status === "resolved") {
-    clearInterval(incidentTimer);
-    incident.review.invalidate();
-    dismissIncidentFixes(incident.id);
-    broadcast(state());
-    const stoodDown = /Stood down/.test(incident.timeline.at(-2)?.text ?? "");
-    if (wasOpen && !stoodDown) {
-      broadcast({ type: "speak", text: closingBriefing(incident.view()) });
-      // The postmortem writes itself; a false alarm doesn't get one.
-      void generatePostmortem(incident).catch((err) => console.warn(`Postmortem failed: ${(err as Error).message}`));
-    }
-  }
-  broadcastIncident();
-}
-
-function endIncident(): void {
-  clearInterval(incidentTimer);
-  incident?.review.invalidate();
-  if (incident) dismissIncidentFixes(incident.id);
-  // Replaced or reset while still open: record that, so it isn't restored later.
-  if (incident && incident.status !== "resolved") {
-    incident.timeline.push({ at: Date.now(), kind: "status", text: "Closed without resolution: replaced by a new incident or a session reset", by: "tower" });
-    incident.status = "resolved";
-    try { incidents.save(incident.record()); }
-    catch (err) { console.warn(`Could not save incident ${incident.id}: ${(err as Error).message}`); }
-  }
-  incident = null;
-  callNotes = null;
-}
-
-let incidentBroadcastPending = false;
-function broadcastIncident(): void {
-  if (incidentBroadcastPending) return;
-  incidentBroadcastPending = true;
-  setImmediate(() => {
-    incidentBroadcastPending = false;
-    const view = incident?.view() ?? null;
-    broadcast({ type: "incident", incident: view });
-    announceRecovery(view);
-    if (incident) {
-      try { incidents.save(incident.record()); }
-      catch (err) { console.warn(`Could not save incident ${incident.id}: ${(err as Error).message}`); }
-    }
-  });
-}
-
-// Once errors are back to normal after a fix, say so (once per incident) and
-// offer to close it. The commander still decides.
-let recoveryAnnouncedFor: string | null = null;
-function announceRecovery(view: ReturnType<Incident["view"]> | null): void {
-  if (!incident || !view || recoveryAnnouncedFor === view.id) return;
-  if (view.status === "resolved" || incident.fixAppliedAt === null || !isRecovered(view)) return;
-  recoveryAnnouncedFor = view.id;
-  const label = production.health.label;
-  const back = `${label[0]!.toUpperCase()}${label.slice(1)} are back to normal`;
-  incident.log("status", back, "tower");
-  broadcast({ type: "speak", text: `${back}. Say “resolve the incident” when you're ready to close it.` });
-}
+// --- Incidents: see incident/commander.ts ---
 
 // A risky action is waiting (approval set) or was decided (approval null).
 function onApproval(agent: Agent, approval: Approval | null): void {
   if (approval) {
-    incident?.log("approval", `Requested: ${approval.summary}`, agentLabel(agent));
+    commander.incident?.log("approval", `Requested: ${approval.summary}`, agentLabel(agent));
     // Keep the spoken prompt short: the full text is on screen.
     const spoken = approval.tool === "post_status_update" ? "post a status page update" : approval.summary.toLowerCase();
     const who = agent.view().role ? `${agent.view().role}, agent ${agent.id},` : `Agent ${agent.id}`;
@@ -709,7 +420,7 @@ function onApproval(agent: Agent, approval: Approval | null): void {
 
 function decideApproval(agent: Agent, decision: "approve" | "deny", by: string, note?: string): void {
   const approval = agent.decide(decision, by, note);
-  if (approval) incident?.log("approval", `${decision === "approve" ? "Approved" : "Denied"}: ${approval.summary}`, by);
+  if (approval) commander.incident?.log("approval", `${decision === "approve" ? "Approved" : "Denied"}: ${approval.summary}`, by);
 }
 
 function agentLabel(a: Agent): string {
@@ -743,12 +454,12 @@ async function routeAndApply(utterance: string, focused: string | null, opts: He
     agents: scoped.map((a) => a.view()),
     viewingTask: task ? task.title : null,
     newTaskMode: !task,
-    pendingProposal: proposals.find((p) => p.status === "open") ?? null,
+    pendingProposal: commander.pendingProposal(),
     rules: rules.list(),
     recent: recent.slice(-4),
     pendingClarification,
     focused: scoped.some((a) => a.id === focused) ? focused : null,
-    incident: incident?.view() ?? null,
+    incident: commander.view(),
     attachments: opts.files?.map((f) => f.name),
     pendingPlan: (task?.missionId ? missions.find((m) => m.id === task.missionId && m.status === "awaiting_approval") : missions.find((m) => m.status === "awaiting_approval"))?.view() ?? null,
   }, undefined, signal);
@@ -781,15 +492,15 @@ async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): P
   const task = opts.taskId ? tasks().find((t) => t.id === opts.taskId) : undefined;
   const scoped = task ? agents.filter((a) => task.agentIds.includes(a.id)) : agents;
   if (v.intent === "incident") {
-    if (v.incidentAction === "declare") declareIncident(v.instruction || "Production incident");
-    else if (v.incidentAction === "stand_down") standDown("commander (voice)");
-    else if (v.incidentAction !== "none") setIncidentStatus(v.incidentAction, "commander (voice)");
+    if (v.incidentAction === "declare") commander.declare(v.instruction || "Production incident");
+    else if (v.incidentAction === "stand_down") commander.standDown("commander (voice)");
+    else if (v.incidentAction !== "none") commander.setStatus(v.incidentAction, "commander (voice)");
     return;
   }
   // An answer to work the tower suggested.
   if (v.target === "proposal") {
-    if (v.intent === "approve") acceptProposal(null);
-    else if (v.intent === "stop") dismissProposal(null);
+    if (v.intent === "approve") commander.acceptProposal(null);
+    else if (v.intent === "stop") commander.dismissProposal(null);
     return;
   }
   // A plan is waiting for approval and this answers it.
@@ -809,7 +520,7 @@ async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): P
     if (!signal.aborted) broadcast({ type: "speak", text });
     return;
   }
-  incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
+  commander.incident?.log("instruction", `“${v.utterance}” → ${v.intent} ${v.target === "all" ? "all agents" : `agent ${v.target}`}`, "commander");
   // Yes or no to an agent that is waiting for approval.
   const waiting = scoped.filter((a) => a.approval && (v.target === a.id || v.target === "all"));
   if ((v.intent === "approve" || v.intent === "stop") && waiting.length) {
@@ -835,8 +546,8 @@ async function apply(v: RouteVerdict, opts: HearOptions, signal: AbortSignal): P
   }
   if (v.intent === "assign" && v.target !== "all") {
     // With the Incident chip selected and no incident yet, new work starts one.
-    if (opts.template === "incident" && !incident) {
-      declareIncident(v.instruction);
+    if (opts.template === "incident" && !commander.incident) {
+      commander.declare(v.instruction);
       return;
     }
     const kind = scoped.find((a) => a.id === v.target)?.template ?? opts.template ?? "general";
@@ -1056,64 +767,38 @@ wss.on("connection", (ws) => {
         break;
       }
       case "declare_incident":
-        declareIncident(msg.title.trim() || "Production incident");
+        commander.declare(msg.title.trim() || "Production incident");
         break;
       case "incident_status":
-        setIncidentStatus(msg.status, "commander");
+        commander.setStatus(msg.status, "commander");
         break;
       case "clear_rules":
         rules.clear();
         broadcast(state());
         break;
       case "watch_toggle":
-        watchtower.enabled = msg.on;
-        broadcast({ type: "watch", watch: watchtower.view() });
-        broadcast({ type: "speak", text: msg.on ? "Watching production." : "I've stopped watching production." });
+        commander.setWatching(msg.on);
         break;
       case "simulate_outage":
-        if (!production.demo) throw new HttpError(409, `Drills need the simulator; production is ${production.label}.`);
-        if (!production.demo.broken) {
-          if (incident && incident.status !== "resolved") throw new HttpError(409, "Resolve or stand down the current incident before starting another drill.");
-          if (msg.scenario === "provider") {
-            production.demo.injectProviderOutage();
-            broadcast({ type: "notice", level: "info", text: "Simulated: the external payment provider is returning 503s. No local deploy caused this outage." });
-          } else {
-            const { badDeployId } = production.demo.injectOutage();
-            broadcast({ type: "notice", level: "info", text: `Simulated: deploy #${badDeployId} just landed on payments-api.` });
-          }
-        }
+        commander.simulateOutage(msg.scenario);
         break;
       case "recover_provider":
-        if (production.demo?.recoverProvider()) {
-          incident?.log("action", "Demo: the external payment provider has restored service. No local rollback was applied.", "simulator");
-          broadcastIncident();
-          broadcast({ type: "notice", level: "info", text: "Simulated provider recovery. Checkout errors will fall over about 45 seconds." });
-        } else throw new HttpError(409, "There is no active provider outage to recover.");
+        commander.recoverProvider();
         break;
       case "retry_recommendation":
-        if (!incident || incident.status === "resolved" || incident.review.view.state === "reviewing") break;
-        incident.review.invalidate();
-        dismissIncidentFixes(incident.id);
-        maybeProposeFix();
+        commander.retryReview();
         break;
       case "skip_investigation":
-        if (!incident || incident.id !== msg.incidentId) throw new HttpError(409, "That incident is no longer current.");
-        if (incident.status === "resolved") break;
-        if (incidentInvestigatorsBusy()) throw new HttpError(409, "Let the investigators finish or stop them before skipping further checks.");
-        incident.skipInvestigation("commander");
-        // The explicit demo reset is immediate; refresh health and re-arm the
-        // watchtower now so the UI and next drill don't wait for the next tick.
-        setIncidentStatus("resolved", "commander");
-        checkProduction();
+        commander.skipInvestigation(msg.incidentId, "commander");
         break;
       case "stand_down":
-        standDown("commander");
+        commander.standDown("commander");
         break;
       case "accept_proposal":
-        acceptProposal(msg.id);
+        commander.acceptProposal(msg.id);
         break;
       case "dismiss_proposal":
-        dismissProposal(msg.id);
+        commander.dismissProposal(msg.id);
         break;
     }
     } catch (error) {
@@ -1195,7 +880,7 @@ async function workApi(
       rules: rules.list(),
       recent: recent.slice(-4),
       pendingClarification,
-      incident: incident?.view() ?? null,
+      incident: commander.view(),
       attachments,
     });
     return json(200, { target: v.target, intent: v.intent, incidentAction: v.incidentAction, instruction: v.instruction });
@@ -1241,60 +926,35 @@ async function incidentApi(req: import("node:http").IncomingMessage, url: URL, j
     const secret = process.env.JAMIE_WEBHOOK_KEY;
     if (!secret || req.headers["x-jamie-api-key"] !== secret) return json(401, { error: "bad webhook key" });
     const body = JSON.parse(await readBody(req)) as { data: Omit<JamieMeeting, "id" | "transcript"> & { transcript: { speakerName: string; text: string }[] } };
-    if (incident) {
-      callNotes = { ...body.data, id: "webhook", transcript: body.data.transcript.map((t) => `**${t.speakerName}** ${t.text}`).join("\n") };
-      incident.jamieMeetingId = callNotes.id;
-      incident.log("action", `Call notes received from Jamie: ${body.data.title}`, "Jamie");
-      proposeFollowUps(callNotes);
-    }
+    commander.receiveCallNotes({ ...body.data, id: "webhook", transcript: body.data.transcript.map((t) => `**${t.speakerName}** ${t.text}`).join("\n") });
     return json(200, { ok: true });
   }
   // Incident history, kept across restarts.
   if (url.pathname === "/api/incidents" && req.method === "GET") {
-    return json(200, { incidents: incidents.list(Number(url.searchParams.get("limit")) || 50) });
+    return json(200, { incidents: commander.history(Number(url.searchParams.get("limit")) || 50) });
   }
   const one = /^\/api\/incidents\/([\w-]+)$/.exec(url.pathname);
   if (one && req.method === "GET") {
-    const record = incident?.id === one[1] ? incident.record() : incidents.get(one[1]!);
+    const record = commander.record(one[1]!);
     return record ? json(200, record) : json(404, { error: "no such incident" });
   }
-  if (!incident) return json(404, { error: "no active incident" });
   if (url.pathname === "/api/incident/jamie" && req.method === "POST") {
     const { meetingId } = parseJson(await readBody(req)) as { meetingId: string };
     if (typeof meetingId !== "string" || !meetingId.trim()) throw new HttpError(400, "meetingId is required.");
-    const current = incident;
-    const notes = await jamie.get(meetingId);
-    if (incident !== current) throw new HttpError(409, "The incident changed while the notes were loading.");
-    callNotes = notes;
-    current.jamieMeetingId = meetingId;
-    current.log("action", `Call notes attached from Jamie: ${callNotes.title}`, "commander");
-    const followUpCount = proposeFollowUps(callNotes);
-    return json(200, { title: callNotes.title, followUpCount });
+    return json(200, await commander.attachMeeting(meetingId));
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "GET") {
-    return json(200, { markdown: incident.postmortem });
+    return json(200, { markdown: commander.requireIncident().postmortem });
   }
   if (url.pathname === "/api/incident/postmortem" && req.method === "POST") {
-    const markdown = await generatePostmortem(incident);
-    return json(200, { markdown });
+    return json(200, { markdown: await commander.generatePostmortem() });
   }
   json(404, { error: "not found" });
 }
 
 restoreSession();
-restoreIncident();
-
-// The watchtower looks at production every few seconds, unasked. A slow
-// backend never stacks checks.
-let checking: Promise<void> | null = null;
-function checkProduction(): void {
-  checking ??= watchtower.check()
-    .then(() => broadcast({ type: "watch", watch: watchtower.view() }))
-    .catch((err) => console.warn(`Watchtower check failed: ${(err as Error).message}`))
-    .finally(() => { checking = null; });
-}
-checkProduction();
-setInterval(checkProduction, 5000);
+commander.restore();
+commander.startWatching();
 
 http.listen(PORT, "127.0.0.1", () => {
   const address = http.address();
@@ -1311,10 +971,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     try { saveNow(); }
     catch (error) { console.error("Could not save the session during shutdown:", error); }
     for (const a of agents) a.close("shutdown");
-    if (incident) {
-      try { incidents.save(incident.record()); }
-      catch (error) { console.error("Could not save the incident during shutdown:", error); }
-    }
+    commander.stop();
+    commander.persist();
     telemetry.close();
     incidents.close();
     process.exit(0);
