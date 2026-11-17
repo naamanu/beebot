@@ -8,21 +8,8 @@
 
 const MIN = 60_000;
 
-export interface Deploy {
-  id: string;
-  service: string;
-  author: string;
-  at: number;
-  message: string;
-  diff: string;
-  rolledBackAt: number | null;
-}
-
-export interface StatusPost {
-  at: number;
-  status: string;
-  message: string;
-}
+import type { Deploy, StatusPost } from "../production/source.ts";
+export type { Deploy, StatusPost };
 
 export type Metric = "error_rate" | "p95_latency_ms" | "rps" | "db_pool_in_use" | "cache_hit_ratio";
 

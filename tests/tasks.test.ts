@@ -4,6 +4,7 @@ import { buildTasks } from "../server/tasks.ts";
 import type { AgentView, MissionView } from "../server/types.ts";
 import { Incident } from "../server/incident/incident.ts";
 import { Jamie } from "../server/incident/jamie.ts";
+import { SimulatorSource } from "../server/production/simulator.ts";
 
 function agent(id: string, missionId: string | null): AgentView {
   return { id, missionId, task: "Generated workstream instructions", status: "idle", events: [{ kind: "result", text: `Result ${id}`, at: 100 }], costUsd: 1, runId: null, template: "coding", role: id === "4" ? "Lead" : "Worker", title: null, startsAt: null, approval: null };
@@ -47,7 +48,7 @@ test("separate tasks with identical requests stay separate", () => {
 });
 
 test("incident investigators share the same task ID used by their activity", () => {
-  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {});
+  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {}, new SimulatorSource());
   const investigators = ["1", "2", "3", "4"].map((id) => ({ ...agent(id, null), template: "incident" as const }));
   const tasks = buildTasks(investigators, [], incident.view());
   assert.equal(tasks.length, 1);
@@ -72,7 +73,7 @@ test("a follow-up or approval keeps completion unavailable while agents are busy
 });
 
 test("an incident becomes ready after its investigators finish and done only when resolved", () => {
-  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {});
+  const incident = new Incident("Checkout failure", "SEV1", new Jamie(undefined), () => {}, new SimulatorSource());
   const investigators = ["1", "2", "3", "4"].map((id) => ({ ...agent(id, null), template: "incident" as const }));
   assert.equal(buildTasks(investigators, [], incident.view())[0]!.status, "ready");
   investigators[0]!.status = "working";

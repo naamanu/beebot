@@ -31,7 +31,7 @@ Underneath the incident workflow, Control Tower also supports planned general an
 
 The application uses TypeScript, a Node.js backend, React and Vite, WebSockets, the Claude Agent SDK, structured MCP tools, Reson8 speech recognition and Jamie’s API and webhook integration. Spoken responses use the browser’s speech synthesis. Session data and SQLite telemetry preserve task results and execution history.
 
-The current prototype demonstrates incident response against a simulated production service, including a faulty deployment and misleading diagnostic signals. Agent execution, tool calls, routing and approval handling are implemented, while production metrics and remediation effects are simulated. It does not yet connect to a real production environment, and active incidents currently remain in memory.
+The current prototype demonstrates incident response against a simulated production service, including a faulty deployment and misleading diagnostic signals. Agent execution, tool calls, routing and approval handling are implemented, while production metrics and remediation effects are simulated. Production is reached through a `ProductionSource` interface (`server/production/`), and the simulator is its only adapter so far; Prometheus/Loki and GitHub deploys are next (see [docs/ROADMAP.md](docs/ROADMAP.md)). Incidents are saved to SQLite and survive restarts.
 
 Control Tower’s central idea is to give engineers a coordinated response team they can direct conversationally, with shared evidence, visible progress and human control over consequential decisions.
 
@@ -99,7 +99,7 @@ They reach production only through tools (`server/incident/`): logs, metrics, de
 - **Scenario 1 — bad deploy:** on a fresh server, deploy #482 cuts the payments DB pool from 50 to 5. The red herrings are a CDN cache dip and an old search warning. Rolling back the causal deploy fixes it; restarting only helps briefly. Deploy IDs increase in subsequent drills. Run `npx tsx scripts/sim-check.ts` to inspect this scenario without model calls.
 - **Scenario 2 — external provider:** choose **Simulate provider outage** from the home screen or ⋯ menu. The external `payment-provider` returns 503s while the local DB pool stays healthy, with no causal local deploy. Inspect both services’ logs and metrics. Expected behavior is to avoid an unsupported local rollback, explain the external evidence, and suggest checks such as provider status or supported failover. The model’s live behavior must still be rehearsed; fixture tests do not prove diagnosis accuracy. **Simulate provider recovery** in ⋯ explicitly restores the simulated external service; it is a demo control, not an agent action. Recovery takes about 45 seconds, then the incident can be resolved.
 
-For a clean comparison, restart the backend between scenarios. Restarting ends the active drill but retains saved postmortems, traces and ordinary tasks. Within one session, finish recovery and resolve the previous incident before injecting another outage.
+For a clean comparison, resolve the incident and restart the backend between scenarios. Restarting resets the simulator to healthy; an open incident is restored marked as interrupted (its investigators do not resume), and saved postmortems, traces and ordinary tasks are kept. Within one session, finish recovery and resolve the previous incident before injecting another outage.
 
 **Jamie:** set `JAMIE_API_KEY` (a personal key from Jamie, Settings → Developers) to search real past calls and attach the war-room call to the postmortem. Without it, the search uses two sample past incidents. Jamie's `meeting.completed` webhook can post to `/webhooks/jamie` (set `JAMIE_WEBHOOK_KEY`; it needs a public HTTPS URL, e.g. through a tunnel).
 
@@ -122,7 +122,7 @@ The helper reads the secret from `.env` without printing it and posts to `http:/
 
 The existing endpoint returns `{ok:true}` even when no incident is loaded, in which case it attaches nothing. Verify the proposal in the UI. Replaying again can create duplicate proposals; webhook deduplication is not implemented. This fixture demonstrates local ingestion and follow-up proposals, not a live Jamie integration.
 
-Incidents live in memory: a server restart ends the drill (the postmortem is kept on disk).
+Incidents are stored in `data/incidents.db`. After a restart, an incident that was still open comes back for review, resolution and its postmortem; past incidents are listed at `/api/incidents` (full record at `/api/incidents/<id>`). The simulator itself restarts healthy, so a restored drill shows recovered metrics while keeping its recorded evidence and deploys.
 
 ## Observability
 
@@ -227,7 +227,7 @@ Read-only tools are `list_services`, `query_logs`, `get_metrics`, `list_deploys`
 
 ### Limitations to evaluate honestly
 
-The simulator contains two known scenarios; it is not a production connector or evidence of broad diagnosis accuracy. Model errors remain possible despite valid citations and majority agreement. Incidents are held in memory, and orchestration does not resume automatically after a restart. Real Jamie retrieval, microphone behavior, external-service latency and the final video require a live rehearsal. No single-agent benchmark or production time-to-recovery improvement has been established.
+The simulator contains two known scenarios; it is not a production connector or evidence of broad diagnosis accuracy. Model errors remain possible despite valid citations and majority agreement. Incidents persist across restarts, but investigators and orchestration do not resume automatically. Real Jamie retrieval, microphone behavior, external-service latency and the final video require a live rehearsal. No single-agent benchmark or production time-to-recovery improvement has been established.
 
 ## Checks
 
@@ -279,3 +279,7 @@ Turn Plan first off for quick one-agent tasks. Missions are saved; after a resta
 6. "Three looks good, ship it."
 
 Or click **Demo tasks** to start four ready-made tasks on the demo repo (`demo/template`, a tiny todo library).
+
+## License
+
+[MIT](LICENSE).

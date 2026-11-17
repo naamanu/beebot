@@ -1,45 +1,61 @@
-import type { Deploy, ShopfrontSim } from "../incident/sim.ts";
+import type { Deploy, Point, ProductionSource } from "../production/source.ts";
 import type { WatchView } from "../types.ts";
 
 export interface Anomaly {
-  errorRate: number; // checkout error rate, %, when it was confirmed
+  errorRate: number; // the health signal (e.g. checkout error rate, %) when it was confirmed
   since: number; // first breaching sample
   suspect: Deploy | null; // the most recent deploy shortly before the spike
 }
 
 export interface WatchOptions {
-  thresholdPct?: number; // checkout error rate that counts as a breach
+  thresholdPct?: number; // overrides the source's health threshold
   sustain?: number; // consecutive breaching checks before it acts
   suspectWindowMs?: number; // how far before the spike a deploy is a suspect
 }
 
-// Watches production without being asked. A sustained breach of the checkout
-// error rate is an anomaly; it fires once, then re-arms only after the store
-// has been healthy again.
+// Watches production without being asked. A sustained breach of the source's
+// health signal is an anomaly; it fires once, then re-arms only after
+// production has been healthy again.
 export class Watchtower {
   enabled = true;
   private breaches: number[] = []; // timestamps of consecutive breaching checks
   private armed = true;
   private lastCheck = 0;
   private lastRate = 0;
+  private lastSeries: Point[] = [];
+  private lastError: string | null = null;
   private readonly threshold: number;
   private readonly sustain: number;
   private readonly suspectWindow: number;
 
   constructor(
-    private sim: ShopfrontSim,
+    private source: ProductionSource,
     private onAnomaly: (a: Anomaly) => void,
     opts: WatchOptions = {},
   ) {
-    this.threshold = opts.thresholdPct ?? 5;
+    this.threshold = opts.thresholdPct ?? source.health.thresholdPct;
     this.sustain = opts.sustain ?? 2;
     this.suspectWindow = opts.suspectWindowMs ?? 15 * 60_000;
   }
 
   // One look at production. Returns the anomaly if this check confirmed one.
-  check(now = Date.now()): Anomaly | null {
+  // A backend error counts as no data: it neither breaches nor re-arms.
+  async check(now = Date.now()): Promise<Anomaly | null> {
+    const { service, metric } = this.source.health;
+    let series: Point[];
+    try {
+      series = await this.source.series(service, metric, 10, now);
+      this.lastError = null;
+    } catch (err) {
+      this.lastError = (err as Error).message;
+      this.lastCheck = now;
+      return null;
+    }
+    const latest = series.at(-1);
     this.lastCheck = now;
-    this.lastRate = this.sim.metric("checkout-api", "error_rate", now);
+    this.lastSeries = series.map((p) => ({ t: p.t, v: Math.round(p.v * 10) / 10 }));
+    if (!latest) return null;
+    this.lastRate = latest.v;
     if (this.lastRate < this.threshold) {
       this.breaches = [];
       this.armed = true;
@@ -49,8 +65,9 @@ export class Watchtower {
     if (!this.enabled || !this.armed || this.breaches.length < this.sustain) return null;
     this.armed = false;
     const since = this.breaches[0]!;
+    const deploys = await this.source.deploys(now).catch(() => [] as Deploy[]);
     const suspect =
-      [...this.sim.deploys]
+      deploys
         .filter((d) => d.at <= since && since - d.at <= this.suspectWindow && !d.rolledBackAt)
         .sort((a, b) => b.at - a.at)[0] ?? null;
     const anomaly = { errorRate: this.lastRate, since, suspect };
@@ -63,7 +80,7 @@ export class Watchtower {
     this.armed = false;
   }
 
-  view(now = Date.now()): WatchView {
+  view(): WatchView {
     const breaching = this.lastRate >= this.threshold;
     return {
       enabled: this.enabled,
@@ -71,7 +88,10 @@ export class Watchtower {
       state: breaching ? "anomaly" : "healthy",
       thresholdPct: this.threshold,
       lastCheckAt: this.lastCheck,
-      series: this.sim.series("checkout-api", "error_rate", 10, now).map((p) => ({ t: p.t, v: Math.round(p.v * 10) / 10 })),
+      series: this.lastSeries,
+      source: { id: this.source.id, label: this.source.label, simulated: this.source.simulated, demo: !!this.source.demo },
+      healthLabel: this.source.health.label,
+      ...(this.lastError ? { error: this.lastError } : {}),
     };
   }
 }

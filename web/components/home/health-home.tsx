@@ -40,9 +40,11 @@ export function HealthHome() {
             <p className="mt-1 text-[15px] text-muted-foreground">
               {off
                 ? "Turn watching back on and the tower will check production every 5 seconds."
-                : bad
-                  ? "Checkout errors are above normal. The tower is on it."
-                  : "Watching checkout on Shopfront every 5 seconds. The tower will speak up if something breaks."}
+                : watch?.error
+                  ? `Can't reach ${watch.source?.label ?? "production"}: ${watch.error}. The tower keeps retrying.`
+                  : bad
+                    ? `${capitalize(watch?.healthLabel ?? "checkout errors")} are above normal. The tower is on it.`
+                    : `Watching ${watch?.healthLabel ?? "checkout errors"} on ${watch?.source?.label ?? "Shopfront"} every 5 seconds. The tower will speak up if something breaks.`}
             </p>
           </div>
         </div>
@@ -52,12 +54,16 @@ export function HealthHome() {
             {watch?.enabled ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}
             {watch?.enabled ? "Stop watching" : "Watch production"}
           </Button>
-          <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage" })} title="Lands a bad deploy on the simulated store">
-            <Zap data-icon="inline-start" /> Simulate a bad deploy
-          </Button>
-          <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage", scenario: "provider" })} title="An external provider fails; no local deploy is to blame">
-            <Zap data-icon="inline-start" /> Simulate provider outage
-          </Button>
+          {watch?.source?.demo !== false && (
+            <>
+              <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage" })} title="Lands a bad deploy on the simulated store">
+                <Zap data-icon="inline-start" /> Simulate a bad deploy
+              </Button>
+              <Button variant="ghost" size="sm" disabled={!connected || bad} onClick={() => send({ type: "simulate_outage", scenario: "provider" })} title="An external provider fails; no local deploy is to blame">
+                <Zap data-icon="inline-start" /> Simulate provider outage
+              </Button>
+            </>
+          )}
         </div>
       </section>
 
@@ -129,7 +135,7 @@ function HealthChart({ watch }: { watch: WatchView }) {
     <div className="flex items-end gap-6">
       <div className="shrink-0">
         <p className="font-heading text-5xl leading-none tabular-nums">{watch.errorRate.toFixed(1)}%</p>
-        <p className="mt-1.5 text-[13px] text-muted-foreground">checkout errors now</p>
+        <p className="mt-1.5 text-[13px] text-muted-foreground">{watch.healthLabel ?? "checkout errors"} now</p>
       </div>
       <div className="relative min-w-0 flex-1">
         <svg
@@ -137,7 +143,7 @@ function HealthChart({ watch }: { watch: WatchView }) {
           className="h-[120px] w-full overflow-visible"
           preserveAspectRatio="none"
           role="img"
-          aria-label={`Checkout error rate over the last 10 minutes, now ${watch.errorRate.toFixed(1)}%`}
+          aria-label={`${capitalize(watch.healthLabel ?? "checkout errors")} over the last 10 minutes, now ${watch.errorRate.toFixed(1)}%`}
           onMouseMove={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
             setHover(Math.round(((e.clientX - r.left) / r.width) * (pts.length - 1)));
@@ -159,4 +165,8 @@ function HealthChart({ watch }: { watch: WatchView }) {
       </div>
     </div>
   );
+}
+
+function capitalize(s: string): string {
+  return s ? s[0]!.toUpperCase() + s.slice(1) : s;
 }

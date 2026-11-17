@@ -3,7 +3,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { estimateCost } from "../pricing.ts";
 import type { IncidentDecision, IncidentRecommendation, IncidentView } from "../types.ts";
-import type { Deploy } from "./sim.ts";
+import type { Deploy } from "../production/source.ts";
 
 // Deliberately accepts public evidence only. No simulator, cause flag, known
 // culprit, or "broken" state can enter the model request through this boundary.
