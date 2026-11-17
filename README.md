@@ -279,3 +279,7 @@ Turn Plan first off for quick one-agent tasks. Missions are saved; after a resta
 6. "Three looks good, ship it."
 
 Or click **Demo tasks** to start four ready-made tasks on the demo repo (`demo/template`, a tiny todo library).
+
+## License
+
+[MIT](LICENSE).
